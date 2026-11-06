@@ -53,3 +53,4 @@ figure img{max-height:8cm;width:auto;max-width:100%}.rx,.lab tr,figure,h3,h4{bre
 @media print{.chk-panel{display:none!important}}
 main{padding-bottom:5rem}
 .chk-extra{margin-top:.8rem;border-top:2px dashed var(--bd)}.chk-it .hint{display:block;color:var(--mut);font-size:.8rem}
+.chk-asp h4 .ovr{font:inherit;font-size:.8rem;padding:.1rem .3rem;margin-left:.3rem}.pass{font-weight:700}.fail{font-weight:700}

@@ -9,16 +9,24 @@
     read(k, d) { try { const r = window.localStorage.getItem(k); return r === null ? d : JSON.parse(r); } catch (_) { return d; } },
     write(k, v) { try { window.localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } },
   };
-  const st = { cases: [], byId: new Map(), timerOn: true, caseId: null, reveal: false, source: '', key: null, opened: new Set(), assessOn: true, chk: new Set(), xchk: new Set(), user: null, visitors: null, panelMin: false, name: String(store.read(NAME_KEY, '') || '').slice(0, 60), entry: null };
+  const st = { cases: [], byId: new Map(), timerOn: true, caseId: null, reveal: false, source: '', key: null, opened: new Set(), assessOn: true, chk: new Set(), xchk: new Set(), ovr: {}, user: null, visitors: null, panelMin: false, name: String(store.read(NAME_KEY, '') || '').slice(0, 60), entry: null };
   const loadHist = () => { const r = store.read(HIST_KEY, []); return Array.isArray(r) ? r.filter((e) => e && typeof e.id === 'string' && Number.isFinite(e.t) && typeof e.name === 'string').slice(-HIST_MAX) : []; };
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v21', d: '2026-11-06', items: ['Missing numeric tests added with example values (labelled “Example data created by AI”): CBC for No. 17; Hematologi for No. 16; Kimia darah for Nos. 5, 6, 9, 10, 14. Existing results were not changed.'] },
+    { v: 'v20', d: '2026-11-06', items: [
+      'Stage 4 now has the examiner’s answer key (scenario & anamnesis, physical exam, diagnostic tests with accessed / not accessed, diagnosis, differential, prognosis, therapy, prescription, education), grouped and collapsed.',
+      'Extra checklist: added DO / DON’T items (preparation, asking permission, examination order, explanations, things to avoid). Still not scored.' ] },
+    { v: 'v19', d: '2026-11-05', items: [
+      'Assessment now follows your teacher’s form: 10 rows scored 1–4, total out of 400, pass at 250 or more (Lulus / Tidak lulus).',
+      'Each row’s score is suggested from the ticked items (none = 1, one = 2, some = 3, all = 4); the examiner can set any row by hand (Auto / Skor 1–4).',
+      'Sessions saved with the earlier rubric (v15–v18) are kept in History but no longer show assessment scores.' ] },
     { v: 'v18', d: '2026-11-05', items: [
       'Extra checklist (preparation, biosafety & restraint, clinical procedure), kept separate from stations 1–3: not scored, with its own “Belum dilakukan” list in the results and its own most-missed list in participant reports.',
       'Visitor list: name and university are asked once after login and recorded in a Google Sheet; the menu shows how many participants have used OSCE Practice.' ] },
     { v: 'v15', d: '2026-11-05', items: [
-      'Optional checklist assessment form (your rubric, in Indonesian): choose it when starting a session.',
+      'Optional checklist assessment form (in Indonesian): choose it when starting a session.',
       'Floating, minimizable checklist in stages 2–3, with all stations in collapsible groups.',
       'New stage before the results to finish the checklist; the results show the scores and what was not done.',
       'History: participant reports with average scores and the criteria most often missed, as PDF.' ] },
@@ -251,7 +259,7 @@
           const v = name.value.replace(/\s+/g, ' ').trim();
           if (v.length < 2) { err.hidden = false; err.textContent = 'Enter the participant’s name (at least 2 characters).'; name.focus(); return; }
           st.name = v.slice(0, 60); store.write(NAME_KEY, st.name);
-          st.caseId = id; st.reveal = false; st.entry = null; st.opened = new Set(); st.chk = new Set(); st.xchk = new Set(); if (st.assessOn) panelBuild();
+          st.caseId = id; st.reveal = false; st.entry = null; st.opened = new Set(); st.chk = new Set(); st.xchk = new Set(); st.ovr = {}; if (st.assessOn) panelBuild();
           briefStage();
         },
       },
@@ -301,6 +309,7 @@
     ];
   };
   const PE = 'Pemeriksaan fisik';
+  const aiTest = (x) => (x.ai ? h('span', { class: 'badge ai', text: 'Example data created by AI' }) : null);
   const numOf = (c) => c.no || st.cases.indexOf(c) + 1;
   const doneIds = () => new Set(loadHist().map((e) => e.id)); // cases already finished (green)
   const peOf = (c) => c.tests.find((t) => t.label === PE);
@@ -315,7 +324,7 @@
     st.opened.add(x.label);
     mount(
       h('div', { class: 'row' }, h('button', { class: 'btn', id: 'back', text: '← Back to examiner view', on: { click: () => examStage(true) } })),
-      h('section', { class: 'card', id: 'result' }, h('h2', { text: x.label }), resultBody(x)));
+      h('section', { class: 'card', id: 'result' }, h('h2', {}, x.label, aiTest(x)), resultBody(x)));
     panelSet(true); panelMinimize();
   }
   function examStage(resume) {
@@ -359,42 +368,27 @@
     panelSet(true);
   }
 
-  /* ---- checklist assessment (rubric: Kertas Kerja Penilai OSCE UKMPPDH 2025; items stay in Indonesian) ---- */
-  const cnt = (a, set, from = 0) => a.items.slice(from).filter((i) => set.has(i.id)).length;
-  const has = (a, set, i) => set.has(a.items[i].id);
-  const A = (id, name, w, items, score) => ({ id, name, w, score, items: items.map((t, i) => ({ id: `${id}${i + 1}`, t })) });
+  /* ---- checklist assessment: the teacher's form (Form/Rubrik Penilaian; 10 rows, score 1–4, total 400, pass ≥ 250). Items stay in Indonesian. ---- */
+  const PASS = 250;
+  const cnt = (a, set) => a.items.filter((i) => set.has(i.id)).length;
+  /** Teacher's definition: 1 none · 2 exactly one indicator · 3 some · 4 all. */
+  const autoScore = (a, set) => { const k = cnt(a, set), n = a.items.length; return k === 0 ? 1 : k === n ? 4 : k === 1 ? 2 : 3; };
+  /** unit = points per score step (row max = unit × 4); pct = the weight printed on the form. */
+  const R = (no, name, pct, unit, items) => ({ id: `r${no}`, no, name, pct, unit, items: items.map((t, i) => ({ id: `${no}.${i + 1}`, t })) });
   const ASSESS = [
-    { id: 'S1', title: 'Stasiun 1: Komunikasi Profesional dengan Klien', aspects: [
-      A('1a', 'Komunikasi dan atau Edukasi klien', 10, [
-        'Mampu membina hubungan baik dengan klien secara verbal, non verbal (ramah, terbuka, kontak mata, salam, empati, dan hubungan komunikasi 2 arah, respon)',
-        'Mampu memberikan kesempatan klien bercerita dan mengarahkan cerita',
-        'Mampu melibatkan klien dalam membuat keputusan dan pemeriksaan klinik (informed consent)',
-        'Mampu memberikan edukasi pada klien sesuai dengan masalah pasien'],
-      (a, c) => { const k = cnt(a, c); return k === 0 ? 1 : k === 1 ? 2 : k <= 3 ? 3 : 4; }),
-      A('1b', 'Perilaku profesional', 10, [
-        'Meminta izin secara lisan (diperlukan untuk skor 2–4)',
-        'Melakukan setiap tindakan dengan berhati-hati dan teliti sehingga tidak membahayakan pasien dan diri sendiri',
-        'Memperhatikan kenyamanan pasien',
-        'Melakukan tindakan sesuai prioritas',
-        'Menunjukkan rasa sayang/welfare kepada pasien',
-        'Mengetahui keterbatasan dengan merujuk atau melakukan konsultasi bila diperlukan'],
-      (a, c) => { const k = cnt(a, c, 1); return !has(a, c, 0) || k === 0 ? 1 : k <= 2 ? 2 : k <= 4 ? 3 : 4; })] },
-    { id: 'S2', title: 'Stasiun 2: Diagnosa Klinik', aspects: [
-      A('2a', 'Anamnesa', 10, ['Menanyakan keluhan utama (diperlukan untuk skor 2–4)', 'Riwayat penyakit sekarang', 'Riwayat pengobatan sebelumnya', 'Riwayat penyakit terdahulu'],
-      (a, c) => { const k = cnt(a, c, 1); return !has(a, c, 0) ? 1 : k <= 1 ? 2 : k === 2 ? 3 : 4; }),
-      A('2b', 'Pemeriksaan Fisik', 10, ['Melakukan pemeriksaan fisik sesuai masalah klinik pasien', 'Menggunakan teknik yang benar', 'Sistematis & lege artis'],
-      (a, c) => (!has(a, c, 0) ? 1 : !has(a, c, 1) ? 2 : !has(a, c, 2) ? 3 : 4)),
-      A('2c', 'Interpretasi Hasil Pemeriksaan Penunjang', 15, ['Meminta pemeriksaan penunjang', 'Pemeriksaan penunjang yang diusulkan sesuai dengan skenario', 'Melakukan interpretasi hasil dengan tepat'],
-      (a, c) => (!has(a, c, 0) ? 1 : !has(a, c, 1) ? 2 : !has(a, c, 2) ? 3 : 4)),
-      A('2d', 'Diagnosa & Diagnosa Banding', 5, ['Dapat menetapkan diagnosa dengan benar', 'Dapat menetapkan 1 diagnosa banding dengan benar', 'Dapat menetapkan > 1 diagnosa banding dengan benar'],
-      (a, c) => { const d = has(a, c, 0), d1 = has(a, c, 1) || has(a, c, 2), d2 = has(a, c, 2); return d && d2 ? 4 : d && d1 ? 3 : d || d1 ? 2 : 1; }),
-      A('2e', 'Ambulator', 10, ['Anamnesis', 'Status present', 'Pemeriksaan fisik', 'Pemeriksaan penunjang'],
-      (a, c) => { const k = cnt(a, c); return k === 0 ? 1 : k === 1 ? 2 : k <= 3 ? 3 : 4; })] },
-    { id: 'S3', title: 'Stasiun 3: Reseptir dan Terapeutik', aspects: [
-      A('3a', 'Pemilihan obat', 20, ['Memilih obat dengan tepat sesuai indikasi', 'Menentukan bentuk sediaan obat dengan tepat', 'Menetapkan dosis dengan tepat'],
-      (a, c) => { const k = cnt(a, c, 1); return !has(a, c, 0) ? 1 : k === 0 ? 2 : k === 1 ? 3 : 4; }),
-      A('3b', 'Penulisan resep', 10, ['Identitas pasien dan klien', 'Komponen obat', 'Instruksi pemberian obat', 'Identitas dokter pemberi resep'],
-      (a, c) => { const k = cnt(a, c); return k === 0 ? 1 : k === 1 ? 2 : k <= 3 ? 3 : 4; })] },
+    { id: 'S1', title: 'St.1 Komunikasi Profesional (30%)', aspects: [
+      R(1, 'Salam dan perkenalan kepada klien', 10, 10, ['Mengucapkan salam kepada klien', 'Memperkenalkan diri sebagai dokter hewan', 'Bersikap/attitude yang sangat baik (ramah, kontak mata, empati)']),
+      R(2, 'Perilaku profesional dan informed consent', 10, 10, ['Menunjukkan perilaku profesional', 'Melibatkan klien dalam pengambilan keputusan/informed consent', 'Bertindak sesuai prioritas', 'Memperhatikan kenyamanan klien dan pasien', 'Melakukan tindakan secara legeartis']),
+      R(3, 'Saran dan edukasi kepada klien', 10, 10, ['Memberikan saran kepada klien', 'Memberikan edukasi kepada klien', 'Bersikap profesional', 'Melakukan setiap tindakan secara teliti'])] },
+    { id: 'S2', title: 'St.2 Diagnosa Klinik (50%)', aspects: [
+      R(4, 'Anamnesis', 5, 5, ['Keluhan utama klien', 'Riwayat penyakit', 'Riwayat pengobatan', 'Status vaksinasi']),
+      R(5, 'Pemeriksaan fisik', 10, 10, ['Sesuai masalah klinis pasien', 'Runut', 'Sistematis', 'Legeartis']),
+      R(6, 'Pemeriksaan penunjang dan interpretasi', 15, 10, ['Menentukan jenis pemeriksaan penunjang yang sesuai (rontgen, USG, EKG, mikroskopis, hematologi, kimia darah, kit tes)', 'Pemeriksaan penunjang menunjang diagnosis definitif', 'Menginterpretasi hasilnya dengan benar']),
+      R(7, 'Diagnosis banding', 10, 5, ['Menyebutkan diagnosis banding yang sesuai', 'Menyebutkan lebih dari satu diagnosis banding', 'Menegakkan diagnosis banding untuk menetapkan diagnosis definitif']),
+      R(8, 'Diagnosis definitif dan prognosa', 10, 20, ['Menegakkan diagnosis definitif dengan benar', 'Menentukan prognosa dengan benar'])] },
+    { id: 'S3', title: 'St.3 Reseptir & Terapeutik (20%)', aspects: [
+      R(9, 'Resep', 15, 15, ['Tepat indikasi', 'Tepat dosis', 'Tepat sediaan', 'Tepat cara pemberian']),
+      R(10, 'Ambulator', 5, 5, ['Anamnesis', 'Status present', 'Pemeriksaan fisik', 'Pemeriksaan penunjang'])] },
   ];
   /* extra checklist: kept apart from the rubric (not scored, not part of stations 1–3); items already in the rubric are left out */
   const EXTRA = { title: 'Cek tambahan (di luar penilaian)', groups: [
@@ -408,17 +402,42 @@
     { id: 'x3', name: '3. Eksekusi Tindakan Klinis', items: [
       { t: 'Menyiapkan alat dan bahan medis secara aseptis', hint: 'Periksa kelengkapan instrumen, tanggal kedaluwarsa obat, dan sterilitas alat' },
       { t: 'Melakukan prosedur klinis secara sistematis sesuai SOP stase', hint: 'Sampaikan tindakan atau temuan klinis secara verbal kepada penguji bila diminta' }] },
+    { id: 'x4', name: 'DO · Persiapan & komunikasi', items: [
+      { t: 'Menyiapkan pulpen dan papan jalan' },
+      { t: 'Menanyakan identitas owner' },
+      { t: 'Meminta waktu sebentar ke owner untuk membaca form rekam medis dan menyusun urutan pengisian' },
+      { t: 'Selalu meminta izin owner sebelum melakukan sesuatu ke hewan', hint: 'Sebelum menimbang, mengukur suhu, dan mengambil sampel untuk pemeriksaan penunjang' },
+      { t: 'Ramah dan tersenyum, menunjukkan kasih sayang kepada hewan (walau hanya boneka)' },
+      { t: 'Sebelum menyudahi konsultasi, menanyakan apakah owner ada yang ingin ditanyakan' }] },
+    { id: 'x5', name: 'DO · Urutan pemeriksaan & penjelasan', items: [
+      { t: 'Anamnesis selengkap-lengkapnya dulu, baru pemeriksaan fisik' },
+      { t: 'Pemeriksaan fisik berurutan: inspeksi, palpasi, auskultasi' },
+      { t: 'Pemeriksaan fisik menyeluruh dari kepala sampai anus, walau keluhan hanya di beberapa bagian' },
+      { t: 'Handling halus, memperlakukan boneka seperti hewan sungguhan' },
+      { t: 'Menjelaskan diagnosis diferensial dulu sebelum pemeriksaan penunjang' },
+      { t: 'Pemeriksaan penunjang dilakukan di meja pemeriksaan' },
+      { t: 'Meminta hasil pemeriksaan penunjang yang spesifik dan lengkap', hint: 'Misal hematologi lengkap atau kimia darah, bukan hanya "cek darah"' },
+      { t: 'Meminta hasil pemeriksaan darah dulu sebelum test kit apa pun' },
+      { t: 'Menjelaskan prognosis kepada owner' },
+      { t: 'Bila penyakit zoonotik, mengedukasi klien tentang zoonosis' }] },
+    { id: 'x6', name: 'DON’T · centang bila TIDAK dilakukan', items: [
+      { t: 'Tidak memakai nama alias saat perkenalan' },
+      { t: 'Tidak meninggalkan hewan sendirian di meja pemeriksaan' },
+      { t: 'Tidak menjelaskan kondisi hewan sambil berdiri di depan meja klien' },
+      { t: 'Tidak memainkan pulpen di depan owner' },
+      { t: 'Tidak menanyakan sinyalemen yang tidak perlu', hint: 'Bila tidak ada datanya, sebutkan saja sesuai bonekanya' }] },
   ].map((g) => ({ ...g, items: g.items.map((it, i) => ({ ...it, id: `${g.id}.${i + 1}` })) })) };
   EXTRA.items = EXTRA.groups.flatMap((g) => g.items.map((i) => ({ ...i, g })));
   const ALL_ITEMS = ASSESS.flatMap((S) => S.aspects.flatMap((a) => a.items.map((i) => ({ ...i, S, a }))));
   const num1 = (x) => (Math.round(x * 10) / 10).toString();
-  /** Score per aspect 1–4 from the ticked items; points earned = weight × score ÷ 4 (total out of 100). */
-  function compute(set) {
+  /** Score per row 1–4: from the ticked items unless the examiner set it by hand (`ovr`: row id → 1–4). Points = unit × score; total out of 400. */
+  function compute(set, ovr) {
     const stations = ASSESS.map((S) => {
-      const aspects = S.aspects.map((a) => { const score = a.score(a, set); return { a, score, earned: (a.w * score) / 4 }; });
-      return { S, aspects, earned: aspects.reduce((t, x) => t + x.earned, 0), max: S.aspects.reduce((t, a) => t + a.w, 0) };
+      const aspects = S.aspects.map((a) => { const manual = ovr && ovr[a.id]; const score = manual || autoScore(a, set); return { a, score, manual: !!manual, earned: a.unit * score }; });
+      return { S, aspects, earned: aspects.reduce((t, x) => t + x.earned, 0), max: S.aspects.reduce((t, a) => t + a.unit * 4, 0) };
     });
-    return { stations, earned: stations.reduce((t, x) => t + x.earned, 0), max: stations.reduce((t, x) => t + x.max, 0) };
+    const earned = stations.reduce((t, x) => t + x.earned, 0);
+    return { stations, earned, max: stations.reduce((t, x) => t + x.max, 0), pass: earned >= PASS };
   }
   /** The station groups with checkboxes. `live` keeps the state in st.chk and updates every open checklist. */
   const chkRoots = [];
@@ -428,7 +447,8 @@
       const sum = h('span', { class: 'muted' }); sums.push([S, sum]);
       return h('details', { class: 'chk-st' }, h('summary', {}, h('strong', { text: S.title }), ' ', sum),
         S.aspects.map((a) => { const b = h('span', { class: 'badge' }); sums.push([a, b]);
-          return h('div', { class: 'chk-asp' }, h('h4', {}, a.name, ' ', b),
+          const sel = h('select', { class: 'ovr', 'data-ovr': a.id, 'aria-label': `Skor manual ${a.name}`, on: { change: (e) => { if (e.target.value) st.ovr[a.id] = Number(e.target.value); else delete st.ovr[a.id]; chkRefresh(); } } }, h('option', { value: '', text: 'Auto' }), [1, 2, 3, 4].map((n) => h('option', { value: String(n), text: `Skor ${n}` })));
+          return h('div', { class: 'chk-asp' }, h('h4', {}, `${a.no}. ${a.name} `, b, ' ', sel),
             a.items.map((it) => h('label', { class: 'chk-it' }, h('input', { type: 'checkbox', 'data-id': it.id, checked: st.chk.has(it.id), on: { change: (e) => { if (e.target.checked) st.chk.add(it.id); else st.chk.delete(it.id); chkRefresh(); } } }), h('span', { text: it.t }))));
         }));
     }));
@@ -440,19 +460,20 @@
     root.refresh = () => {
       xsum.textContent = `· tidak dinilai · ${st.xchk.size}/${EXTRA.items.length} dicentang`;
       root.querySelectorAll('input[data-x]').forEach((i) => { i.checked = st.xchk.has(i.dataset.x); });
-      const r = compute(st.chk);
+      const r = compute(st.chk, st.ovr);
       for (const [o, el] of sums) {
         if (o.aspects) { const x = r.stations.find((y) => y.S === o); el.textContent = `· ${o.aspects.reduce((t, a) => t + cnt(a, st.chk), 0)}/${o.aspects.reduce((t, a) => t + a.items.length, 0)} ticked · ${num1(x.earned)}/${x.max}`; }
-        else { const x = r.stations.flatMap((y) => y.aspects).find((y) => y.a === o); el.textContent = `Skor ${x.score}/4`; }
+        else { const x = r.stations.flatMap((y) => y.aspects).find((y) => y.a === o); el.textContent = `Skor ${x.score}/4${x.manual ? ' (manual)' : ''}`; }
       }
       root.querySelectorAll('input[data-id]').forEach((i) => { i.checked = st.chk.has(i.dataset.id); });
+      root.querySelectorAll('select[data-ovr]').forEach((i) => { i.value = st.ovr[i.dataset.ovr] ? String(st.ovr[i.dataset.ovr]) : ''; });
     };
     chkRoots.push(root); root.refresh(); return root;
   }
   function chkRefresh() {
     for (let i = chkRoots.length - 1; i >= 0; i--) { if (!chkRoots[i].isConnected) chkRoots.splice(i, 1); else chkRoots[i].refresh(); }
     const t = document.getElementById('chk-total');
-    if (t) t.textContent = `${num1(compute(st.chk).earned)}/100 · ${st.chk.size}/${ALL_ITEMS.length}`;
+    if (t) t.textContent = `${num1(compute(st.chk, st.ovr).earned)}/400 · ${st.chk.size}/${ALL_ITEMS.length}`;
   }
   /* floating, minimizable panel shown in stages 2–3 */
   let panelEl = null;
@@ -468,29 +489,55 @@
   function panelMinimize() { if (!panelEl) return; st.panelMin = true; panelEl.classList.add('min'); const b = panelEl.querySelector('#chk-min'); if (b) b.textContent = 'Open'; }
   function panelSet(on) { if (panelEl) panelEl.hidden = !(on && st.assessOn); }
   /** Stage between 3 and the results: finish ticking. */
+  /** Examiner's answer key, grouped by category and collapsed (same idea as the station groups). */
+  function answerKeyCard(c) {
+    const ai = (sec) => (c.ai && c.ai.includes(sec) ? h('span', { class: 'badge ai', text: 'Answers created by AI' }) : null);
+    const grp = (title, ...kids) => h('details', { class: 'chk-st key-grp' }, h('summary', {}, h('strong', { text: title })), h('div', { class: 'full' }, kids));
+    const tests = otherTests(c), pe = peOf(c);
+    const n = tests.filter((x) => st.opened.has(x.label)).length;
+    return h('section', { class: 'card', id: 'answer-key' }, h('h2', { text: 'Kunci jawaban (untuk penguji)' }),
+      h('p', { class: 'muted', text: 'Tertutup secara default; buka per kategori.' }),
+      grp('Skenario & anamnesis', scenario(c),
+        c.anamnesis.length ? c.anamnesis.map((x) => h('div', { class: 'qa' }, h('div', { class: 'q', text: x.q }), h('div', { text: x.a }))) : h('p', { class: 'muted', text: 'No anamnesis answers in the source.' })),
+      pe ? grp('Pemeriksaan fisik', (pe.quote || []).map((q) => h('p', { class: 'problem', text: q }))) : null,
+      grp(`Pemeriksaan penunjang (${n} dari ${tests.length} diminta di stage 2)`,
+        tests.length ? tests.map((x) => h('div', { class: 'tst' },
+          h('h4', {}, x.label, aiTest(x), h('span', { class: st.opened.has(x.label) ? 'badge acc' : 'badge no', text: st.opened.has(x.label) ? 'Diminta di stage 2' : 'Belum diminta' })),
+          resultBody(x, true))) : h('p', { class: 'muted', text: 'None.' })),
+      grp('Diagnosis', h('p', { text: c.diagnosis || '-' })),
+      c.differential && c.differential.length ? grp('Diagnosis banding', lines(c.differential)) : null,
+      grp('Prognosis', ai('prognosis'), h('p', { text: c.prognosis || '-' })),
+      c.treatment && c.treatment.length ? grp('Terapi', ai('treatment'), lines(c.treatment)) : null,
+      grp('Resep', ai('prescription'), c.prescription && c.prescription.length
+        ? [c.prescription.map((x) => h('pre', { class: 'rx', text: x })), c.rxFooter && h('pre', { class: 'rx foot', text: c.rxFooter }), c.rxNote && h('p', { class: 'muted', text: c.rxNote })]
+        : h('p', { text: '-' })),
+      c.education && c.education.length ? grp('Edukasi', ai('education'), lines(c.education)) : null);
+  }
   function assessStage() {
     stopClock();
     mount(stage(4, 'Complete the assessment'),
+      answerKeyCard(cur()),
       h('section', { class: 'card' }, h('h2', { text: 'Lengkapi penilaian' }),
-        h('p', { class: 'muted', text: `Tick anything you have not marked yet (the extra checklist at the bottom is not scored). Tests requested by the examinee in stage 2: ${[...st.opened].length} of ${otherTests(cur()).length}.` }),
+        h('p', { class: 'muted', text: `Tick anything you have not marked yet (the extra checklist at the bottom is not scored). The answer key above is for the examiner. Tests requested by the examinee in stage 2: ${[...st.opened].length} of ${otherTests(cur()).length}.` }),
         checklistNode()),
       h('div', { class: 'row' }, h('button', { class: 'btn primary', id: 'next4', text: 'Next: results →', on: { click: end } })));
   }
   /** Assessment results: scores per aspect and what was not done. */
   function assessCard(e) {
-    if (!e || !e.assess) return null;
+    if (!e || !e.assess || e.form !== 2) return null;
     const set = new Set(e.chk || []);
-    const r = compute(set);
+    const r = compute(set, e.ovr);
     return h('section', { class: 'card', id: 'assess-res' }, h('h2', { text: 'Assessment results' }),
       h('p', { class: 'big', text: `${num1(r.earned)} / ${r.max}` }),
+      h('p', { class: r.pass ? 'pass' : 'fail', text: r.pass ? `Lulus (${PASS}–${r.max})` : `Tidak lulus (di bawah ${PASS})` }),
       r.stations.map((x) => [
         h('h3', { text: `${x.S.title} · ${num1(x.earned)} / ${x.max}` }),
         h('div', { class: 'tbl-wrap' }, h('table', { class: 'lab' },
-          h('thead', {}, h('tr', {}, ['Aspek yang dinilai', 'Skor (1–4)', 'Bobot', 'Nilai'].map((t) => h('th', { text: t })))),
-          h('tbody', {}, x.aspects.map((y) => h('tr', {}, h('td', { text: y.a.name }), h('td', { text: String(y.score) }), h('td', { text: String(y.a.w) }), h('td', { text: num1(y.earned) })))))),
+          h('thead', {}, h('tr', {}, ['No', 'Aspek yang dinilai', 'Skor (1–4)', 'Bobot', 'Nilai'].map((t) => h('th', { text: t })))),
+          h('tbody', {}, x.aspects.map((y) => h('tr', {}, h('td', { text: String(y.a.no) }), h('td', { text: y.a.name }), h('td', { text: `${y.score}${y.manual ? ' (manual)' : ''}` }), h('td', { text: `${y.a.pct}%` }), h('td', { text: `${num1(y.earned)} / ${y.a.unit * 4}` })))))),
         (() => { const miss = x.S.aspects.flatMap((a) => a.items.filter((i) => !set.has(i.id)).map((i) => [a, i]));
-          return miss.length ? [h('h4', { text: 'Belum dilakukan' }), h('ul', {}, miss.map(([a, i]) => h('li', {}, h('strong', { text: `${a.name}: ` }), i.t)))] : h('p', { class: 'muted', text: 'Semua kriteria dilakukan.' }); })()]),
-      h('p', { class: 'muted', text: 'Skor tiap aspek (1–4) dihitung dari butir yang dicentang sesuai rubrik; nilai = bobot × skor ÷ 4, total 100. Rumus ini dipilih aplikasi, bukan aturan resmi penguji.' }));
+          return miss.length ? [h('h4', { text: 'Belum dilakukan' }), h('ul', {}, miss.map(([a, i]) => h('li', {}, h('strong', { text: `${a.no}. ${a.name}: ` }), i.t)))] : h('p', { class: 'muted', text: 'Semua kriteria dilakukan.' }); })()]),
+      h('p', { class: 'muted', text: 'Skor tiap baris: 1 = tidak satu pun indikator, 2 = salah satu, 3 = sebagian, 4 = seluruh indikator; dihitung dari butir yang dicentang kecuali diubah manual. Nilai = bobot poin × skor, total 400, lulus ≥ 250.' }));
   }
 
   /** Extra checklist result: separate from the scored assessment. */
@@ -506,26 +553,26 @@
   const nameKey = (n) => String(n).replace(/\s+/g, ' ').trim().toLowerCase();
   function participants() {
     const m = new Map();
-    for (const e of loadHist()) { if (!e.assess) continue; const k = nameKey(e.name); if (!m.has(k)) m.set(k, { key: k, name: e.name, list: [] }); const p = m.get(k); p.name = e.name; p.list.push(e); }
+    for (const e of loadHist()) { if (!e.assess || e.form !== 2) continue; const k = nameKey(e.name); if (!m.has(k)) m.set(k, { key: k, name: e.name, list: [] }); const p = m.get(k); p.name = e.name; p.list.push(e); }
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
   function reportNodes(p) {
     const n = p.list.length;
-    const rs = p.list.map((e) => ({ e, r: compute(new Set(e.chk || [])) }));
+    const rs = p.list.map((e) => ({ e, r: compute(new Set(e.chk || []), e.ovr) }));
     const avg = (f) => rs.reduce((t, x) => t + f(x.r), 0) / n;
     const missed = ALL_ITEMS.map((it) => ({ it, k: p.list.filter((e) => !(e.chk || []).includes(it.id)).length })).filter((x) => x.k > 0).sort((a, b) => b.k - a.k);
     const aspAvg = ASSESS.flatMap((S) => S.aspects).map((a) => ({ a, v: rs.reduce((t, x) => t + x.r.stations.flatMap((y) => y.aspects).find((y) => y.a === a).score, 0) / n }));
     return [
       h('section', { class: 'card' }, h('h2', { text: `Evaluation report: ${p.name}` }),
-        h('p', { class: 'muted', text: `${n} session${n === 1 ? '' : 's'} with the assessment form · average total ${num1(avg((r) => r.earned))} / 100` }),
+        h('p', { class: 'muted', text: `${n} session${n === 1 ? '' : 's'} with the assessment form · average total ${num1(avg((r) => r.earned))} / 400 · passed ${rs.filter((x) => x.r.pass).length} of ${n}` }),
         h('h3', { text: 'Sessions' }),
         h('div', { class: 'tbl-wrap' }, h('table', { class: 'lab' },
-          h('thead', {}, h('tr', {}, ['Date', 'Case', ...ASSESS.map((S) => S.id), 'Total'].map((t) => h('th', { text: t })))),
-          h('tbody', {}, rs.map(({ e, r }) => { const c = st.byId.get(e.id); return h('tr', {}, h('td', { text: when(e.t) }), h('td', { text: c ? `No. ${numOf(c)}` : '-' }), ...r.stations.map((x) => h('td', { text: `${num1(x.earned)}/${x.max}` })), h('td', { text: num1(r.earned) })); })))),
-        h('h3', { text: 'Average score per aspect (1–4)' }),
-        h('ul', {}, aspAvg.map((x) => h('li', { text: `${x.a.name}: ${num1(x.v)}` }))),
+          h('thead', {}, h('tr', {}, ['Date', 'Case', ...ASSESS.map((S) => S.id), 'Total', 'Status'].map((t) => h('th', { text: t })))),
+          h('tbody', {}, rs.map(({ e, r }) => { const c = st.byId.get(e.id); return h('tr', {}, h('td', { text: when(e.t) }), h('td', { text: c ? `No. ${numOf(c)}` : '-' }), ...r.stations.map((x) => h('td', { text: `${num1(x.earned)}/${x.max}` })), h('td', { text: num1(r.earned) }), h('td', { text: r.pass ? 'Lulus' : 'Tidak lulus' })); })))),
+        h('h3', { text: 'Average score per row (1–4)' }),
+        h('ul', {}, aspAvg.map((x) => h('li', { text: `${x.a.no}. ${x.a.name}: ${num1(x.v)}` }))),
         h('h3', { text: 'Most often missed' }),
-        missed.length ? h('ol', {}, missed.slice(0, 15).map((x) => h('li', {}, h('strong', { text: `${x.it.a.name}: ` }), `${x.it.t} `, h('span', { class: 'muted', text: `(missed in ${x.k} of ${n} · ${Math.round((100 * x.k) / n)}%)` })))) : h('p', { class: 'muted', text: 'Nothing was missed.' }),
+        missed.length ? h('ol', {}, missed.slice(0, 15).map((x) => h('li', {}, h('strong', { text: `${x.it.a.no}. ${x.it.a.name}: ` }), `${x.it.t} `, h('span', { class: 'muted', text: `(missed in ${x.k} of ${n} · ${Math.round((100 * x.k) / n)}%)` })))) : h('p', { class: 'muted', text: 'Nothing was missed.' }),
         (() => { const xs = p.list.filter((e) => Array.isArray(e.xchk)); if (!xs.length) return null;
           const xm = EXTRA.items.map((it) => ({ it, k: xs.filter((e) => !e.xchk.includes(it.id)).length })).filter((x) => x.k > 0).sort((a, b) => b.k - a.k);
           return [h('h3', { text: `${EXTRA.title}: paling sering terlewat` }),
@@ -580,7 +627,7 @@
     const c = cur();
     if (!st.entry) {
       st.entry = { t: Date.now(), id: c.id, name: st.name, timer: st.timerOn, opened: [...st.opened] };
-      if (st.assessOn) { st.entry.assess = true; st.entry.chk = [...st.chk]; st.entry.xchk = [...st.xchk]; }
+      if (st.assessOn) { st.entry.assess = true; st.entry.form = 2; st.entry.chk = [...st.chk]; st.entry.xchk = [...st.xchk]; st.entry.ovr = { ...st.ovr }; }
       const a = loadHist(); a.push(st.entry); saveHist(a);
     }
     mount(stage(stageTotal(), 'Examination results'), finishedCard(c, st.entry), assessCard(st.entry), extraCard(st.entry), resultsCard(c, st.entry, true),
@@ -603,7 +650,7 @@
       h('h3', { text: 'Diagnostic results' }),
       mark && tests.length ? h('p', { class: 'muted', id: o.ids ? 'acc-sum' : null, text: `${n} of ${tests.length} supplementary examinations were accessed in stage 2.` }) : null,
       tests.length ? tests.map((x) => h('div', { class: 'tst' },
-        h('h4', {}, x.label, mark && h('span', { class: o.opened.has(x.label) ? 'badge acc' : 'badge no', text: o.opened.has(x.label) ? 'Accessed in stage 2' : 'Not accessed' })),
+        h('h4', {}, x.label, aiTest(x), mark && h('span', { class: o.opened.has(x.label) ? 'badge acc' : 'badge no', text: o.opened.has(x.label) ? 'Accessed in stage 2' : 'Not accessed' })),
         resultBody(x, true))) : h('p', { class: 'muted', text: 'None.' }),
       h('h2', { class: 'sub', text: 'Answer key' }), keyBody(c, !!(o && o.ids)));
   }
