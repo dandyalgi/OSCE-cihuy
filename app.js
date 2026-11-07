@@ -14,6 +14,7 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v22', d: '2026-11-07', items: ['New case No. 19 (External 2 Batch 1): Cat Shiro, 3.5 years, FLUTD / urolithiasis. Diagnosis, prognosis, therapy, prescription and education were written by AI (labelled); test results and images are from the source.'] },
     { v: 'v21', d: '2026-11-06', items: ['Missing numeric tests added with example values (labelled “Example data created by AI”): CBC for No. 17; Hematologi for No. 16; Kimia darah for Nos. 5, 6, 9, 10, 14. Existing results were not changed.'] },
     { v: 'v20', d: '2026-11-06', items: [
       'Stage 4 now has the examiner’s answer key (scenario & anamnesis, physical exam, diagnostic tests with accessed / not accessed, diagnosis, differential, prognosis, therapy, prescription, education), grouped and collapsed.',
