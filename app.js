@@ -14,6 +14,7 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v23', d: '2026-11-07', items: ['Participant reports: two new graphs, score over time (with the pass line) and number of missed checklist items over time.'] },
     { v: 'v22', d: '2026-11-07', items: ['New case No. 19 (External 2 Batch 1): Cat Shiro, 3.5 years, FLUTD / urolithiasis. Diagnosis, prognosis, therapy, prescription and education were written by AI (labelled); test results and images are from the source.'] },
     { v: 'v21', d: '2026-11-06', items: ['Missing numeric tests added with example values (labelled “Example data created by AI”): CBC for No. 17; Hematologi for No. 16; Kimia darah for Nos. 5, 6, 9, 10, 14. Existing results were not changed.'] },
     { v: 'v20', d: '2026-11-06', items: [
@@ -557,6 +558,20 @@
     for (const e of loadHist()) { if (!e.assess || e.form !== 2) continue; const k = nameKey(e.name); if (!m.has(k)) m.set(k, { key: k, name: e.name, list: [] }); const p = m.get(k); p.name = e.name; p.list.push(e); }
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
+  /** Small inline-SVG line chart (works on screen and in PDF). vals/labels: one point per session. */
+  function lineChart(vals, labels, o) {
+    const NS = 'http://www.w3.org/2000/svg', W = 640, H = 236, L = 46, R = 14, T = 26, B = 44;
+    const el = (n, a, t) => { const x = document.createElementNS(NS, n); for (const k in a) x.setAttribute(k, a[k]); if (t != null) x.textContent = t; return x; };
+    const top = Math.max(o.max || 0, ...vals, o.ref || 0, 1), px = (i) => (vals.length === 1 ? L + (W - L - R) / 2 : L + (i * (W - L - R)) / (vals.length - 1)), py = (v) => T + (H - T - B) * (1 - v / top);
+    const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.title, class: 'chart-svg' });
+    for (let g = 0; g <= 4; g++) { const v = (top * g) / 4, y = py(v); svg.append(el('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: 'currentColor', 'stroke-opacity': '.15' }), el('text', { x: L - 6, y: y + 4, 'text-anchor': 'end', 'font-size': '11', fill: 'currentColor' }, String(Math.round(v)))); }
+    if (o.ref) svg.append(el('line', { x1: L, x2: W - R, y1: py(o.ref), y2: py(o.ref), stroke: '#16a34a', 'stroke-width': '1.5', 'stroke-dasharray': '5 4' }), el('text', { x: W - R, y: py(o.ref) - 4, 'text-anchor': 'end', 'font-size': '11', fill: '#16a34a' }, o.refLabel));
+    svg.append(el('polyline', { points: vals.map((v, i) => `${px(i)},${py(v)}`).join(' '), fill: 'none', stroke: o.color, 'stroke-width': '2.5' }));
+    const every = Math.ceil(vals.length / 8);
+    vals.forEach((v, i) => { svg.append(el('circle', { cx: px(i), cy: py(v), r: 4, fill: o.color }), el('text', { x: px(i), y: py(v) - 8, 'text-anchor': 'middle', 'font-size': '11', fill: 'currentColor' }, num1(v)));
+      if (i % every === 0 || i === vals.length - 1) svg.append(el('text', { x: px(i), y: H - 24, 'text-anchor': 'middle', 'font-size': '10', fill: 'currentColor' }, `#${i + 1}`), el('text', { x: px(i), y: H - 11, 'text-anchor': 'middle', 'font-size': '9', fill: 'currentColor', 'fill-opacity': '.7' }, labels[i])); });
+    return h('div', { class: 'chart' }, svg);
+  }
   function reportNodes(p) {
     const n = p.list.length;
     const rs = p.list.map((e) => ({ e, r: compute(new Set(e.chk || []), e.ovr) }));
@@ -566,6 +581,10 @@
     return [
       h('section', { class: 'card' }, h('h2', { text: `Evaluation report: ${p.name}` }),
         h('p', { class: 'muted', text: `${n} session${n === 1 ? '' : 's'} with the assessment form · average total ${num1(avg((r) => r.earned))} / 400 · passed ${rs.filter((x) => x.r.pass).length} of ${n}` }),
+        h('h3', { text: 'Score over time' }),
+        lineChart(rs.map((x) => x.r.earned), p.list.map((e) => new Date(e.t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })), { title: 'Total score per session', max: 400, ref: 250, refLabel: 'Pass 250', color: '#2563eb' }),
+        h('h3', { text: 'Missed items over time' }),
+        lineChart(p.list.map((e) => ALL_ITEMS.filter((it) => !(e.chk || []).includes(it.id)).length), p.list.map((e) => new Date(e.t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })), { title: 'Checklist items missed per session', max: 0, color: '#dc2626' }),
         h('h3', { text: 'Sessions' }),
         h('div', { class: 'tbl-wrap' }, h('table', { class: 'lab' },
           h('thead', {}, h('tr', {}, ['Date', 'Case', ...ASSESS.map((S) => S.id), 'Total', 'Status'].map((t) => h('th', { text: t })))),
