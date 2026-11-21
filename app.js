@@ -2,7 +2,8 @@
   'use strict';
   const DATA_URL = 'cases.enc'; // AES-GCM encrypted case database (see encrypt-data.js)
   const KEY_STORE = 'osce.key.v1';
-  const T = { brief: 120, exam: 900, outside: 180 }; // seconds: examinee reads, examiner stage, segment outside the app
+  const T = { brief: 120, exam: 1080 }; // seconds: examinee reads (2 min), examiner stage (18 min = former 15 + 3)
+  const REMINDERS = [{ left: 600, msg: '10 minutes remaining', bells: 1 }, { left: 300, msg: '5 minutes remaining', bells: 2 }, { left: 180, msg: '3 minutes remaining', bells: 3 }]; // shown during the 18-minute stage
   const app = document.getElementById('app');
   const NAME_KEY = 'osce.name.v1', HIST_KEY = 'osce.history.v1', HIST_MAX = 200;
   const store = {
@@ -14,6 +15,17 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v34', d: '2026-11-21', items: ['Added 3 cases from Agha Thariq Sugijanto (Addison, EPI, Cushing; 30 cases total). Agha added to the contributors list.'] },
+    { v: 'v33', d: '2026-11-21', items: ['Time reminders are now bell sounds only (no voice): 1 strike at 10 minutes left, 2 at 5, 3 at 3, 2 when reading time ends, 4 when the exam time is up. On-screen notices stay.'] },
+    { v: 'v32', d: '2026-11-21', items: ['TO NAS cases corrected against the original PDFs: full original scenario wording; Ancylostomiasis scenario and CBC now follow Undana; NSHP case diagnosis follows Undikma; extra source versions noted in the prescription notes.'] },
+    { v: 'v31', d: '2026-11-21', items: ['Added 8 cases from TO NAS NOVEMBER 2026: EPI, Cushing, Ancylostomiasis, bacterial cystitis, pseudomembranous cystitis, megacolon, MMVD, rickets (27 cases total).'] },
+    { v: 'v30', d: '2026-11-21', items: ['Assessment form scale changed: total 400, pass at 250 (was 800 / 550). Same 9 rows and scoring rules; saved sessions are recalculated automatically.'] },
+    { v: 'v29', d: '2026-11-20', items: ['Time reminders are now spoken (Indonesian voice): “Sisa waktu sepuluh / lima / tiga menit” and “Waktu habis”, with the on-screen notice. Browsers without speech use a beep.', 'New “Back up your progress” card on the main menu: Export progress (a .json file with your history) and Import progress (merge, or replace the current history).'] },
+    { v: 'v28', d: '2026-11-20', items: ['Examiner mode: the 15-minute stage and the 3-minute segment outside the app are now one 18-minute stage. Reminders pop up with 10, 5 and 3 minutes left. When the time runs out the app moves to the next stage by itself, after the 2-minute reading time as well as after the 18 minutes. Skip timer still lets you carry on without a timer.', 'Stage numbers are now 1 reading · 2 examiner · 3 assessment form · 4 results (3 stages without the assessment form).'] },
+    { v: 'v27', d: '2026-11-20', items: ['New Single-player mode (button on the main menu): do a case on your own without an examiner, in three stages. 1) Read the case (2 min). 2) Work through six steps in 18 min: history-taking by chatting with the owner (replies when your question contains the right keywords), physical examination form, differential diagnosis and diagnostic tests (many decoys; after 5 tests further ones are flagged), final diagnosis and prognosis, treatment and prescription, client education. 3) No timer: your answers next to the answer key, plus the history questions you did not ask and the tests you did not look at. No scoring rubric. When a timer runs out the app moves on by itself.'] },
+    { v: 'v26', d: '2026-11-20', items: ['Back to the original look; only the BPUPKH seal was kept in the header.'] },
+    { v: 'v25', d: '2026-11-20', items: ['Assessment form replaced with the Kertas Kerja Penilai OSCE UKMPPDH 2025: 9 rows scored 1–4 by the form’s descriptors, total 800, pass at 550 (St.1 Komunikasi 20%, St.2 Diagnosa Klinik 50%, St.3 Reseptir & Terapeutik 30%).', 'Extra checklist: removed the items that the new form already covers (permission, kindness/welfare, examination order and technique, specific tests, zoonosis education, restraint, not leaving the animal alone).', 'Sessions saved with the old 400-point form still open in History with their old scores; participant reports now count only sessions with the new form.'] },
+    { v: 'v24', d: '2026-11-20', items: ['The BPUPKH seal is now in the header.', 'Main menu: a Contributors list on the left and a Suggestions panel on the right (suggestions or a Google Drive link with cases).'] },
     { v: 'v23', d: '2026-11-07', items: ['Participant reports: two new graphs, score over time (with the pass line) and number of missed checklist items over time.'] },
     { v: 'v22', d: '2026-11-07', items: ['New case No. 19 (External 2 Batch 1): Cat Shiro, 3.5 years, FLUTD / urolithiasis. Diagnosis, prognosis, therapy, prescription and education were written by AI (labelled); test results and images are from the source.'] },
     { v: 'v21', d: '2026-11-06', items: ['Missing numeric tests added with example values (labelled “Example data created by AI”): CBC for No. 17; Hematologi for No. 16; Kimia darah for Nos. 5, 6, 9, 10, 14. Existing results were not changed.'] },
@@ -171,11 +183,21 @@
     registry.count(); name.focus();
   }
   const clock = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-  function beep() {
+  /** Bell sound (WebAudio, no files): n strikes, 0.9 s apart. The browser may need one tap on the page before it allows sound. */
+  let audioCtx = null;
+  function bell(n = 1) {
     try {
       const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
-      const c = new C(), o = c.createOscillator(), g = c.createGain();
-      o.connect(g); g.connect(c.destination); g.gain.value = 0.15; o.frequency.value = 880; o.start(); o.stop(c.currentTime + 0.4);
+      audioCtx = audioCtx || new C(); if (audioCtx.state === 'suspended') audioCtx.resume();
+      for (let i = 0; i < n; i++) {
+        const t0 = audioCtx.currentTime + i * 0.9;
+        [[1, 1, 2.6], [2.76, 0.5, 4], [5.4, 0.25, 7], [8.9, 0.12, 10]].forEach(([r, a, k]) => {
+          const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+          o.type = 'sine'; o.frequency.value = 880 * r;
+          g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.22 * a, t0 + 0.005); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2 + 1.4 / k * 1.5);
+          o.connect(g); g.connect(audioCtx.destination); o.start(t0); o.stop(t0 + 1.8);
+        });
+      }
     } catch { /* sound is optional */ }
   }
 
@@ -191,14 +213,28 @@
     else if (clk.state === 'skipped') { clk.node.textContent = 'Timer skipped'; clk.node.classList.remove('low'); }
     if (clk.skipBtn) clk.skipBtn.hidden = clk.state !== 'run';
   }
-  function startClock(secs, onDone) {
-    stopClock(); clk.state = 'run'; clk.end = Date.now() + secs * 1000; clk.onDone = onDone;
+  /** Pop-up reminder with bell strikes; disappears by itself after a few seconds. */
+  function reminder(msg, bells) {
+    const old = document.getElementById('reminder'); if (old) old.remove();
+    const n = h('div', { class: 'reminder', id: 'reminder', role: 'alert' }, h('strong', { text: msg }), h('button', { class: 'linkbtn', type: 'button', text: 'Close', on: { click: () => n.remove() } }));
+    document.body.append(n); bell(bells || 1); setTimeout(() => { if (n.isConnected) n.remove(); }, 8000);
+  }
+  /** onDone('done') when the time runs out (the app then moves on by itself); onDone('skipped') for Skip timer. `marks` = reminders by seconds left. */
+  function startClock(secs, onDone, marks, bells) {
+    stopClock(); clk.bells = bells; clk.state = 'run'; clk.end = Date.now() + secs * 1000; clk.onDone = onDone;
+    const todo = (marks || []).filter((m) => m.left < secs);
     clk.tick = setInterval(() => {
-      if (clk.state === 'run' && Date.now() >= clk.end) { clk.state = 'done'; beep(); clk.onDone(); }
+      if (clk.state === 'run') {
+        const left = Math.ceil((clk.end - Date.now()) / 1000);
+        while (todo.length && left <= todo[0].left) { const m = todo.shift(); reminder(m.msg, m.bells); }
+        if (Date.now() >= clk.end) { clk.state = 'done'; const f = clk.onDone; stopClockKeepNode(); bell(clk.bells || 4); f('done'); return; }
+      }
       paintClock();
     }, 250);
   }
-  function skipClock() { if (clk.state !== 'run') return; clk.state = 'skipped'; clk.onDone(); paintClock(); }
+  /** Time is up: stop ticking but keep the node so it reads “Time is up” until the next stage replaces it. */
+  function stopClockKeepNode() { if (clk.tick) clearInterval(clk.tick); clk.tick = null; paintClock(); }
+  function skipClock() { if (clk.state !== 'run') return; clk.state = 'skipped'; clk.onDone('skipped'); paintClock(); }
   function timerBlock() {
     const node = h('div', { class: 'timer', id: 'timer' });
     const skip = h('button', { class: 'btn', id: 'skip', text: 'Skip timer', on: { click: skipClock } });
@@ -207,12 +243,96 @@
   }
 
   const cur = () => st.byId.get(st.caseId);
-  const stageTotal = () => (st.assessOn ? 5 : 4);
+  const stageTotal = () => (st.assessOn ? 4 : 3);
   const stage = (n, label) => h('p', { class: 'stage', text: `Stage ${n} of ${stageTotal()} · ${label}` });
   const lines = (arr) => h('ul', {}, (arr || []).map((x) => h('li', { text: x })));
 
+  /* ---- BPUPKH side panels: contributors (left) and suggestions / Drive links (right) ---- */
+  function contribCard() {
+    const list = Array.isArray(window.BPUPKH_CONTRIBUTORS) ? window.BPUPKH_CONTRIBUTORS.filter((c) => c && c.name) : [];
+    return h('section', { class: 'card side-card', id: 'contributors' },
+      h('h2', { text: 'Contributors' }),
+      list.length
+        ? h('ul', { class: 'contrib-list' }, list.map((c) => h('li', {}, h('b', { text: String(c.name) }), (c.role || c.uni) && h('span', { text: [c.role, c.uni].filter(Boolean).join(' · ') }))))
+        : h('p', { class: 'muted', text: 'Contributors will be listed here. Want to be one? Send a suggestion or a Google Drive link on the right.' }));
+  }
+  let lastSuggest = 0;
+  function suggestCard(send, who) {
+    const kind = h('select', { id: 'sug-kind' }, h('option', { value: 'Suggestion', text: 'Suggestion' }), h('option', { value: 'Contribution', text: 'Contribution: Google Drive link' }));
+    const link = h('input', { id: 'sug-link', type: 'text', maxlength: '400', autocomplete: 'off', placeholder: 'https://drive.google.com/…' });
+    const msg = h('textarea', { id: 'sug-msg', maxlength: '1500', placeholder: 'Your suggestion, or a short note about the files (questions and answer keys, source, university).' });
+    const note = h('p', { class: 'notice', id: 'sug-note', role: 'status', hidden: true });
+    const btn = h('button', { class: 'btn primary', type: 'submit', id: 'sug-send', text: 'Send' });
+    const say = (type, text) => { note.hidden = false; note.className = `notice ${type}`; note.textContent = text; };
+    return h('form', {
+      class: 'card side-card sug-form', id: 'suggestions', novalidate: true,
+      on: {
+        submit: async (e) => {
+          e.preventDefault();
+          const url = link.value.trim(); const text = msg.value.trim();
+          if (url && !/^https:\/\/(drive|docs)\.google\.com\/\S+$/i.test(url)) return say('err', 'The link must be a Google Drive or Google Docs link (https://drive.google.com/…).');
+          if (kind.value === 'Contribution' && !url) return say('err', 'Paste the Google Drive link with your questions and answer keys.');
+          if (!url && text.length < 5) return say('err', 'Write your suggestion first (at least 5 characters).');
+          if (Date.now() - lastSuggest < 30000) return say('err', 'Please wait a few seconds before sending another one.');
+          btn.disabled = true; say('ok', 'Sending…');
+          const res = await send({ action: 'suggest', sender: who(), kind: kind.value, link: url, message: text });
+          btn.disabled = false;
+          if (res === 'nourl') return say('err', 'Suggestions are not available: this site is not connected to the Google Sheet.');
+          if (!res) return say('err', 'Could not send. Check your connection and try again.');
+          lastSuggest = Date.now(); link.value = ''; msg.value = ''; say('ok', 'Thank you! Your message was sent.');
+        },
+      },
+    },
+    h('h2', { text: 'Suggestions' }),
+    h('p', { class: 'muted', text: 'Send a suggestion, or share a Google Drive link with questions and answer keys. Set the link to “Anyone with the link can view”.' }),
+    h('label', { for: 'sug-kind', text: 'Type' }), kind,
+    h('label', { for: 'sug-link', text: 'Google Drive link (optional for suggestions)' }), link,
+    h('label', { for: 'sug-msg', text: 'Message' }), msg,
+    h('div', { class: 'form-actions' }, btn), note);
+  }
+  const bpupkhShell = (nodes, left, right) => h('div', { class: 'shell' }, h('aside', { class: 'left' }, left), h('div', { class: 'mainCol' }, nodes), h('aside', { class: 'right' }, right));
+
+  /* ---- back up progress: the exam history lives in this browser only ---- */
+  const PROGRESS_FORMAT = 'osce-practice-progress';
+  const histKey = (e) => `${e.t}|${e.id}|${e.name}`;
+  function exportProgress() {
+    const data = { app: PROGRESS_FORMAT, v: 1, exportedAt: new Date().toISOString(), history: loadHist() };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
+    const a = h('a', { href: url, download: `osce-progress-${new Date().toISOString().slice(0, 10)}.json` });
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function importProgress(text, replace) {
+    let d; try { d = JSON.parse(text); } catch (_) { return { ok: false, message: 'That file is not valid JSON.' }; }
+    if (!d || d.app !== PROGRESS_FORMAT || !Array.isArray(d.history)) return { ok: false, message: 'This is not an OSCE Practice progress file.' };
+    const good = d.history.filter((e) => e && typeof e.id === 'string' && Number.isFinite(e.t) && typeof e.name === 'string');
+    const base = replace ? [] : loadHist();
+    const known = new Set(base.map(histKey));
+    const add = []; for (const e of good) { const k = histKey(e); if (!known.has(k)) { known.add(k); add.push(e); } }
+    const all = base.concat(add).sort((a, b) => a.t - b.t);
+    if (!saveHist(all)) return { ok: false, message: 'Could not save: browser storage is unavailable.' };
+    return { ok: true, message: `Imported ${add.length} session${add.length === 1 ? '' : 's'}${good.length - add.length ? ` (${good.length - add.length} already present)` : ''}. History now has ${Math.min(all.length, HIST_MAX)}.` };
+  }
+  function backupCard(onDone, initial) {
+    const note = h('p', { class: 'notice', role: 'status', hidden: true });
+    const say = (type, text) => { note.hidden = false; note.className = `notice ${type === 'err' ? 'err' : ''}`; note.textContent = text; };
+    if (initial) say('ok', initial);
+    const replace = h('input', { id: 'pg-replace', type: 'checkbox' });
+    const fileIn = h('input', { id: 'pg-file', type: 'file', accept: '.json,application/json', on: { change: () => {
+      const f = fileIn.files && fileIn.files[0]; if (!f) return;
+      if (replace.checked && !window.confirm('Replace all current history with the backup?')) { fileIn.value = ''; return; }
+      const r = new FileReader();
+      r.onload = () => { const res = importProgress(String(r.result), replace.checked); say(res.ok ? 'ok' : 'err', res.message); fileIn.value = ''; if (res.ok && onDone) onDone(res.message); };
+      r.onerror = () => say('err', 'Could not read that file.'); r.readAsText(f);
+    } } });
+    return h('section', { class: 'card', id: 'backup' }, h('h2', { text: 'Back up your progress' }),
+      h('p', { class: 'muted', text: 'Your history (finished cases, scores and participant reports) is stored in this browser only. Export it to keep a copy or move to another device, then import it there.' }),
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', id: 'pg-export', text: 'Export progress', on: { click: exportProgress } })),
+      h('label', { for: 'pg-file', text: 'Import progress (.json)' }), fileIn,
+      h('label', { class: 'chk', for: 'pg-replace' }, replace, h('span', { text: 'Replace current history instead of merging' })), note);
+  }
+
   /* ---- 0. setup ---- */
-  function home() {
+  function home(msg) {
     stopClock();
     const sources = [...new Set(st.cases.map((c) => c.source))];
     const srcSel = h('select', { id: 'source' }, h('option', { value: '', text: 'All sources' }), sources.map((s) => h('option', { value: s, text: s })));
@@ -225,7 +345,8 @@
     const tm = h('input', { id: 'timer-on', type: 'checkbox', checked: st.timerOn });
     const as = h('input', { id: 'assess-on', type: 'checkbox', checked: st.assessOn });
     const go = (id) => { st.timerOn = tm.checked; st.assessOn = as.checked; nameStage(id); };
-    mount(
+    const sendSug = async (body) => (REGISTRY_URL ? registry.call(REGISTRY_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, app: 'osce' }) }) : 'nourl');
+    mount(bpupkhShell([
       h('section', { class: 'card' },
         h('h2', { text: 'Start an OSCE case' }),
         st.user && h('p', { class: 'muted', id: 'user-line' }, `Signed in as ${st.user.name} (${st.user.university}). `, h('button', { class: 'linkbtn', type: 'button', id: 'change-user', text: 'Change name / university', on: { click: () => userStage(home, true) } })),
@@ -233,18 +354,21 @@
         h('p', { class: 'muted', text: `${st.cases.length} cases. Two people: the examiner operates the app, the examinee reads the case on screen first.` }),
         h('div', { class: 'sel' }, h('label', { for: 'source', text: 'Source:' }), srcSel),
         h('div', { class: 'sel' }, h('label', { for: 'case', text: 'Case:' }), caseSel),
-        h('label', { class: 'chk', for: 'timer-on' }, tm, h('span', { text: 'Use timers (2 min read · 15 min examiner stage · 3 min outside the app)' })),
-        h('label', { class: 'chk', for: 'assess-on' }, as, h('span', { text: 'Use the checklist assessment form (floating checklist in stages 2–3, completed in a extra stage, with scores in the results)' })),
+        h('label', { class: 'chk', for: 'timer-on' }, tm, h('span', { text: 'Use timers (2 min read · 18 min examiner stage with reminders at 10, 5 and 3 minutes left; the next stage opens by itself when time is up)' })),
+        h('label', { class: 'chk', for: 'assess-on' }, as, h('span', { text: 'Use the checklist assessment form (floating checklist in stage 2, completed in an extra stage, with scores in the results)' })),
         h('div', { class: 'row' },
           h('button', { class: 'btn primary', id: 'start', text: 'Start selected case', on: { click: () => go(caseSel.value) } }),
+          h('button', { class: 'btn', id: 'solo', text: 'Single-player mode', title: 'Do the selected case on your own, without an examiner', on: { click: () => window.OSCE_SOLO && window.OSCE_SOLO.start(caseSel.value) } }),
           h('button', { class: 'btn', id: 'random', text: 'Random case', on: { click: () => { const p = pool(); go(p[Math.floor(Math.random() * p.length)].id); } } }),
           h('button', { class: 'btn', id: 'logout', text: 'Log out', on: { click: () => { sess.clear(); window.location.reload(); } } }))),
       h('section', { class: 'card' }, h('h2', { text: 'Browse' }),
         h('div', { class: 'row' },
           h('button', { class: 'btn', id: 'all-q', text: `All questions (${st.cases.length})`, on: { click: () => questions() } }),
           h('button', { class: 'btn', id: 'hist', text: `History (${loadHist().length})`, on: { click: () => history() } }))),
+      backupCard((m) => home(m), typeof msg === 'string' ? msg : ''),
       h('section', { class: 'card', id: 'changelog' }, h('h2', { text: 'Changelog' }),
-        CHANGELOG.map((e, i) => h('details', { class: 'cl', open: i === 0 }, h('summary', {}, h('strong', { text: e.v }), ` · ${e.d}`), lines(e.items)))));
+        CHANGELOG.map((e, i) => h('details', { class: 'cl', open: i === 0 }, h('summary', {}, h('strong', { text: e.v }), ` · ${e.d}`), lines(e.items))))],
+      contribCard(), suggestCard(sendSug, () => (st.user ? `${st.user.name} (${st.user.university})` : 'Unknown'))));
   }
 
   /* ---- 0b. participant name; the 2-minute clock starts only after this is confirmed ---- */
@@ -277,7 +401,7 @@
   function briefStage() {
     const c = cur();
     const next = h('button', { class: 'btn primary', id: 'next1', text: 'Next →', hidden: st.timerOn, on: { click: () => examStage() } });
-    if (st.timerOn) startClock(T.brief, () => { next.hidden = false; }); else stopClock();
+    if (st.timerOn) startClock(T.brief, (why) => { if (why === 'done') examStage(); else next.hidden = false; }, null, 2); else stopClock();
     mount(
       stage(1, 'Examinee reads the case'),
       h('section', { class: 'card' },
@@ -331,7 +455,7 @@
   }
   function examStage(resume) {
     const c = cur();
-    if (resume !== true) { if (st.timerOn) startClock(T.exam, () => {}); else stopClock(); st.reveal = false; }
+    if (resume !== true) { if (st.timerOn) startClock(T.exam, (why) => { if (why === 'done') afterExam(); }, REMINDERS, 4); else stopClock(); st.reveal = false; }
     const reveal = h('input', { id: 'reveal', type: 'checkbox', checked: st.reveal });
     const ans = h('div', { id: 'answer' });
     const paint = () => {
@@ -342,7 +466,7 @@
     reveal.addEventListener('change', () => { st.reveal = reveal.checked; paint(); });
     paint();
     mount(
-      stage(2, 'Examiner'),
+      stage(2, 'Examiner (18 min)'),
       h('section', { class: 'card' }, h('h2', { text: `No. ${numOf(c)} · ${c.title}` }), st.timerOn && timerBlock(),
         h('p', { class: 'muted', text: 'You answer the examinee’s history-taking questions using the expected responses below.' }),
         c.incomplete && h('p', { class: 'notice', text: 'This source case is incomplete (no history answers, test results or prescription).' })),
@@ -355,29 +479,20 @@
         h('div', { class: 'links' }, otherTests(c).map((x) => h('button', { class: 'linkbtn', text: x.label + ((x.images || []).length ? ' (image)' : '') + (x.table ? ' (table)' : '') + (st.opened.has(x.label) ? ' ✓' : ''), on: { click: () => testView(x) } })))),
       h('section', { class: 'card' }, h('h2', { text: 'Answer key' }),
         h('label', { class: 'chk', for: 'reveal' }, reveal, h('span', { text: 'Show diagnosis and treatment' })), ans),
-      h('div', { class: 'row' }, h('button', { class: 'btn primary', id: 'next2', text: 'Next: segment outside the app →', on: { click: outsideStage } })));
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', id: 'next2', text: st.assessOn ? 'Next: complete the assessment →' : 'Finish', on: { click: afterExam } })));
     panelSet(true);
   }
 
-  /* ---- 3. segment outside the app (3 min) ---- */
-  function outsideStage() {
-    if (st.timerOn) startClock(T.outside, () => {}); else stopClock();
-    mount(
-      stage(3, 'Outside the application'),
-      h('section', { class: 'card done' }, h('h2', { text: 'Continue the examination outside the app' }), st.timerOn && timerBlock(),
-        h('p', { class: 'muted', text: 'Put the device aside. The examiner continues the rest of the assessment.' }),
-        h('div', { class: 'row' }, h('button', { class: 'btn primary', id: 'finish', text: st.assessOn ? 'Next: complete the assessment →' : 'Finish', on: { click: () => (st.assessOn ? assessStage() : end()) } }))));
-    panelSet(true);
-  }
+  /* the 18-minute stage ends (button or time up): on to the assessment form, or straight to the results */
+  function afterExam() { stopClock(); if (st.assessOn) assessStage(); else end(); }
 
   /* ---- checklist assessment: the teacher's form (Form/Rubrik Penilaian; 10 rows, score 1–4, total 400, pass ≥ 250). Items stay in Indonesian. ---- */
-  const PASS = 250;
   const cnt = (a, set) => a.items.filter((i) => set.has(i.id)).length;
   /** Teacher's definition: 1 none · 2 exactly one indicator · 3 some · 4 all. */
-  const autoScore = (a, set) => { const k = cnt(a, set), n = a.items.length; return k === 0 ? 1 : k === n ? 4 : k === 1 ? 2 : 3; };
+  const autoScore = (a, set) => { if (a.sc) return a.sc(a.items.map((i) => set.has(i.id))); const k = cnt(a, set), n = a.items.length; return k === 0 ? 1 : k === n ? 4 : k === 1 ? 2 : 3; };
   /** unit = points per score step (row max = unit × 4); pct = the weight printed on the form. */
-  const R = (no, name, pct, unit, items) => ({ id: `r${no}`, no, name, pct, unit, items: items.map((t, i) => ({ id: `${no}.${i + 1}`, t })) });
-  const ASSESS = [
+  const R = (no, name, pct, unit, items, sc) => ({ id: `r${no}`, no, name, pct, unit, sc, items: items.map((t, i) => ({ id: `${no}.${i + 1}`, t })) });
+  const OLD_ASSESS = [
     { id: 'S1', title: 'St.1 Komunikasi Profesional (30%)', aspects: [
       R(1, 'Salam dan perkenalan kepada klien', 10, 10, ['Mengucapkan salam kepada klien', 'Memperkenalkan diri sebagai dokter hewan', 'Bersikap/attitude yang sangat baik (ramah, kontak mata, empati)']),
       R(2, 'Perilaku profesional dan informed consent', 10, 10, ['Menunjukkan perilaku profesional', 'Melibatkan klien dalam pengambilan keputusan/informed consent', 'Bertindak sesuai prioritas', 'Memperhatikan kenyamanan klien dan pasien', 'Melakukan tindakan secara legeartis']),
@@ -392,6 +507,34 @@
       R(9, 'Resep', 15, 15, ['Tepat indikasi', 'Tepat dosis', 'Tepat sediaan', 'Tepat cara pemberian']),
       R(10, 'Ambulator', 5, 5, ['Anamnesis', 'Status present', 'Pemeriksaan fisik', 'Pemeriksaan penunjang'])] },
   ];
+  const ASSESS = [
+    { id: 'S1', title: 'St.1 Komunikasi Profesional (20%)', aspects: [
+      R(1, 'Komunikasi dan/atau edukasi klien', 10, 10, ['Membina hubungan baik dengan klien secara verbal dan non verbal (ramah, terbuka, kontak mata, salam, empati, komunikasi 2 arah, respon)', 'Memberi kesempatan klien bercerita dan mengarahkan cerita', 'Melibatkan klien dalam membuat keputusan dan pemeriksaan klinik (informed consent)', 'Memberikan edukasi kepada klien sesuai dengan masalah pasien']),
+      R(2, 'Perilaku profesional', 10, 10, ['Meminta izin secara lisan', 'Melakukan setiap tindakan dengan berhati-hati dan teliti sehingga tidak membahayakan pasien dan diri sendiri', 'Memperhatikan kenyamanan pasien', 'Melakukan tindakan sesuai prioritas', 'Menunjukkan rasa sayang/welfare kepada pasien', 'Mengetahui keterbatasan dengan merujuk atau melakukan konsultasi bila diperlukan'],
+        (b) => { const p = b.slice(1).filter(Boolean).length; return !b[0] ? (p ? 2 : 1) : p <= 2 ? 2 : p <= 4 ? 3 : 4; })] },
+    { id: 'S2', title: 'St.2 Diagnosa Klinik (50%)', aspects: [
+      R(3, 'Anamnesa', 10, 10, ['Menanyakan keluhan utama', 'Riwayat penyakit sekarang', 'Riwayat pengobatan sebelumnya', 'Riwayat penyakit terdahulu'],
+        (b) => { const p = b.slice(1).filter(Boolean).length; return !b[0] ? 1 : p <= 1 ? 2 : p === 2 ? 3 : 4; }),
+      R(4, 'Pemeriksaan fisik', 10, 10, ['Pemeriksaan fisik sesuai masalah klinik pasien', 'Menggunakan teknik yang benar', 'Sistematis dan legeartis'],
+        (b) => (!b[0] ? 1 : !b[1] ? 2 : !b[2] ? 3 : 4)),
+      R(5, 'Interpretasi hasil pemeriksaan penunjang', 15, 15, ['Mengusulkan pemeriksaan penunjang kepada klien', 'Pemeriksaan penunjang yang diusulkan benar sesuai dengan skenario', 'Interpretasi hasil dengan tepat'],
+        (b) => (!b[0] ? 1 : !b[1] ? 2 : !b[2] ? 3 : 4)),
+      R(6, 'Diagnosa dan diagnosa banding', 5, 5, ['Menetapkan diagnosa dengan benar', 'Menetapkan 1 diagnosa banding dengan benar', 'Menentukan lebih dari 1 diagnosa banding dengan benar'],
+        (b) => { const dd = b[1] || b[2]; return b[0] && b[2] ? 4 : b[0] && dd ? 3 : b[0] || dd ? 2 : 1; }),
+      R(7, 'Ambulator', 10, 10, ['Anamnesis', 'Status present', 'Pemeriksaan fisik', 'Pemeriksaan penunjang'])] },
+    { id: 'S3', title: 'St.3 Reseptir & Terapeutik (30%)', aspects: [
+      R(8, 'Pemilihan obat', 20, 20, ['Memilih obat dengan tepat sesuai indikasi', 'Menentukan bentuk sediaan obat dengan tepat', 'Menetapkan dosis dengan tepat'],
+        (b) => (!b[0] ? 1 : 2 + (b[1] ? 1 : 0) + (b[2] ? 1 : 0))),
+      R(9, 'Penulisan resep', 10, 10, ['Identitas pasien dan klien', 'Komponen obat', 'Instruksi pemberian obat', 'Identitas dokter pemberi resep'])] },
+  ];
+  /** Rubrics by form number: 2 = first teacher form (kept so old history still reads), 3 = Kertas Kerja Penilai OSCE UKMPPDH 2025 (current). */
+  const FORMS = { 2: { ASSESS: OLD_ASSESS }, 3: { ASSESS } };
+  Object.values(FORMS).forEach((f) => { f.ALL = f.ASSESS.flatMap((S) => S.aspects.flatMap((a) => a.items.map((i) => ({ ...i, S, a })))); });
+  const FORM_NOW = 3;
+  const PASS_OF = { 2: 250, 3: 250 }; const MAX_OF = { 2: 400, 3: 400 };
+  const PASS = PASS_OF[FORM_NOW]; const MAXS = MAX_OF[FORM_NOW];
+  /* items of the extra checklist that the 2025 rubric already covers (removed; ids stay index-based) */
+  const DROPPED = new Set(['x2.3', 'x4.4', 'x4.5', 'x4.6', 'x5.2', 'x5.3', 'x5.4', 'x5.7', 'x5.8', 'x5.10', 'x6.2']);
   /* extra checklist: kept apart from the rubric (not scored, not part of stations 1–3); items already in the rubric are left out */
   const EXTRA = { title: 'Cek tambahan (di luar penilaian)', groups: [
     { id: 'x1', name: '1. Persiapan & Komunikasi Awal', items: [
@@ -428,18 +571,18 @@
       { t: 'Tidak menjelaskan kondisi hewan sambil berdiri di depan meja klien' },
       { t: 'Tidak memainkan pulpen di depan owner' },
       { t: 'Tidak menanyakan sinyalemen yang tidak perlu', hint: 'Bila tidak ada datanya, sebutkan saja sesuai bonekanya' }] },
-  ].map((g) => ({ ...g, items: g.items.map((it, i) => ({ ...it, id: `${g.id}.${i + 1}` })) })) };
+  ].map((g) => ({ ...g, items: g.items.map((it, i) => ({ ...it, id: `${g.id}.${i + 1}` })).filter((it) => !DROPPED.has(it.id)) })) };
   EXTRA.items = EXTRA.groups.flatMap((g) => g.items.map((i) => ({ ...i, g })));
-  const ALL_ITEMS = ASSESS.flatMap((S) => S.aspects.flatMap((a) => a.items.map((i) => ({ ...i, S, a }))));
+  const ALL_ITEMS = FORMS[FORM_NOW].ALL;
   const num1 = (x) => (Math.round(x * 10) / 10).toString();
   /** Score per row 1–4: from the ticked items unless the examiner set it by hand (`ovr`: row id → 1–4). Points = unit × score; total out of 400. */
-  function compute(set, ovr) {
-    const stations = ASSESS.map((S) => {
+  function compute(set, ovr, form) {
+    const stations = FORMS[form || FORM_NOW].ASSESS.map((S) => {
       const aspects = S.aspects.map((a) => { const manual = ovr && ovr[a.id]; const score = manual || autoScore(a, set); return { a, score, manual: !!manual, earned: a.unit * score }; });
       return { S, aspects, earned: aspects.reduce((t, x) => t + x.earned, 0), max: S.aspects.reduce((t, a) => t + a.unit * 4, 0) };
     });
     const earned = stations.reduce((t, x) => t + x.earned, 0);
-    return { stations, earned, max: stations.reduce((t, x) => t + x.max, 0), pass: earned >= PASS };
+    return { stations, earned, max: stations.reduce((t, x) => t + x.max, 0), pass: earned >= PASS_OF[form || FORM_NOW], passMark: PASS_OF[form || FORM_NOW] };
   }
   /** The station groups with checkboxes. `live` keeps the state in st.chk and updates every open checklist. */
   const chkRoots = [];
@@ -475,9 +618,9 @@
   function chkRefresh() {
     for (let i = chkRoots.length - 1; i >= 0; i--) { if (!chkRoots[i].isConnected) chkRoots.splice(i, 1); else chkRoots[i].refresh(); }
     const t = document.getElementById('chk-total');
-    if (t) t.textContent = `${num1(compute(st.chk, st.ovr).earned)}/400 · ${st.chk.size}/${ALL_ITEMS.length}`;
+    if (t) t.textContent = `${num1(compute(st.chk, st.ovr).earned)}/${MAXS} · ${st.chk.size}/${ALL_ITEMS.length}`;
   }
-  /* floating, minimizable panel shown in stages 2–3 */
+  /* floating, minimizable panel shown in stage 2 */
   let panelEl = null;
   function panelBuild() {
     if (panelEl) panelEl.remove();
@@ -517,7 +660,7 @@
   }
   function assessStage() {
     stopClock();
-    mount(stage(4, 'Complete the assessment'),
+    mount(stage(3, 'Complete the assessment'),
       answerKeyCard(cur()),
       h('section', { class: 'card' }, h('h2', { text: 'Lengkapi penilaian' }),
         h('p', { class: 'muted', text: `Tick anything you have not marked yet (the extra checklist at the bottom is not scored). The answer key above is for the examiner. Tests requested by the examinee in stage 2: ${[...st.opened].length} of ${otherTests(cur()).length}.` }),
@@ -526,12 +669,12 @@
   }
   /** Assessment results: scores per aspect and what was not done. */
   function assessCard(e) {
-    if (!e || !e.assess || e.form !== 2) return null;
+    if (!e || !e.assess || !FORMS[e.form]) return null;
     const set = new Set(e.chk || []);
-    const r = compute(set, e.ovr);
+    const r = compute(set, e.ovr, e.form);
     return h('section', { class: 'card', id: 'assess-res' }, h('h2', { text: 'Assessment results' }),
       h('p', { class: 'big', text: `${num1(r.earned)} / ${r.max}` }),
-      h('p', { class: r.pass ? 'pass' : 'fail', text: r.pass ? `Lulus (${PASS}–${r.max})` : `Tidak lulus (di bawah ${PASS})` }),
+      h('p', { class: r.pass ? 'pass' : 'fail', text: r.pass ? `Lulus (${r.passMark}–${r.max})` : `Tidak lulus (di bawah ${r.passMark})` }),
       r.stations.map((x) => [
         h('h3', { text: `${x.S.title} · ${num1(x.earned)} / ${x.max}` }),
         h('div', { class: 'tbl-wrap' }, h('table', { class: 'lab' },
@@ -539,7 +682,7 @@
           h('tbody', {}, x.aspects.map((y) => h('tr', {}, h('td', { text: String(y.a.no) }), h('td', { text: y.a.name }), h('td', { text: `${y.score}${y.manual ? ' (manual)' : ''}` }), h('td', { text: `${y.a.pct}%` }), h('td', { text: `${num1(y.earned)} / ${y.a.unit * 4}` })))))),
         (() => { const miss = x.S.aspects.flatMap((a) => a.items.filter((i) => !set.has(i.id)).map((i) => [a, i]));
           return miss.length ? [h('h4', { text: 'Belum dilakukan' }), h('ul', {}, miss.map(([a, i]) => h('li', {}, h('strong', { text: `${a.no}. ${a.name}: ` }), i.t)))] : h('p', { class: 'muted', text: 'Semua kriteria dilakukan.' }); })()]),
-      h('p', { class: 'muted', text: 'Skor tiap baris: 1 = tidak satu pun indikator, 2 = salah satu, 3 = sebagian, 4 = seluruh indikator; dihitung dari butir yang dicentang kecuali diubah manual. Nilai = bobot poin × skor, total 400, lulus ≥ 250.' }));
+      h('p', { class: 'muted', text: 'Skor tiap baris (1–4) dihitung dari butir yang dicentang menurut deskriptor Kertas Kerja Penilai OSCE UKMPPDH 2025, kecuali diubah manual. Nilai = bobot × skor, total 400, lulus ≥ 250.' }));
   }
 
   /** Extra checklist result: separate from the scored assessment. */
@@ -555,7 +698,7 @@
   const nameKey = (n) => String(n).replace(/\s+/g, ' ').trim().toLowerCase();
   function participants() {
     const m = new Map();
-    for (const e of loadHist()) { if (!e.assess || e.form !== 2) continue; const k = nameKey(e.name); if (!m.has(k)) m.set(k, { key: k, name: e.name, list: [] }); const p = m.get(k); p.name = e.name; p.list.push(e); }
+    for (const e of loadHist()) { if (!e.assess || e.form !== FORM_NOW) continue; const k = nameKey(e.name); if (!m.has(k)) m.set(k, { key: k, name: e.name, list: [] }); const p = m.get(k); p.name = e.name; p.list.push(e); }
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
   /** Small inline-SVG line chart (works on screen and in PDF). vals/labels: one point per session. */
@@ -580,9 +723,9 @@
     const aspAvg = ASSESS.flatMap((S) => S.aspects).map((a) => ({ a, v: rs.reduce((t, x) => t + x.r.stations.flatMap((y) => y.aspects).find((y) => y.a === a).score, 0) / n }));
     return [
       h('section', { class: 'card' }, h('h2', { text: `Evaluation report: ${p.name}` }),
-        h('p', { class: 'muted', text: `${n} session${n === 1 ? '' : 's'} with the assessment form · average total ${num1(avg((r) => r.earned))} / 400 · passed ${rs.filter((x) => x.r.pass).length} of ${n}` }),
+        h('p', { class: 'muted', text: `${n} session${n === 1 ? '' : 's'} with the assessment form · average total ${num1(avg((r) => r.earned))} / ${MAXS} · passed ${rs.filter((x) => x.r.pass).length} of ${n}` }),
         h('h3', { text: 'Score over time' }),
-        lineChart(rs.map((x) => x.r.earned), p.list.map((e) => new Date(e.t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })), { title: 'Total score per session', max: 400, ref: 250, refLabel: 'Pass 250', color: '#2563eb' }),
+        lineChart(rs.map((x) => x.r.earned), p.list.map((e) => new Date(e.t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })), { title: 'Total score per session', max: MAXS, ref: PASS, refLabel: `Pass ${PASS}`, color: '#2563eb' }),
         h('h3', { text: 'Missed items over time' }),
         lineChart(p.list.map((e) => ALL_ITEMS.filter((it) => !(e.chk || []).includes(it.id)).length), p.list.map((e) => new Date(e.t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })), { title: 'Checklist items missed per session', max: 0, color: '#dc2626' }),
         h('h3', { text: 'Sessions' }),
@@ -647,7 +790,7 @@
     const c = cur();
     if (!st.entry) {
       st.entry = { t: Date.now(), id: c.id, name: st.name, timer: st.timerOn, opened: [...st.opened] };
-      if (st.assessOn) { st.entry.assess = true; st.entry.form = 2; st.entry.chk = [...st.chk]; st.entry.xchk = [...st.xchk]; st.entry.ovr = { ...st.ovr }; }
+      if (st.assessOn) { st.entry.assess = true; st.entry.form = FORM_NOW; st.entry.chk = [...st.chk]; st.entry.xchk = [...st.xchk]; st.entry.ovr = { ...st.ovr }; }
       const a = loadHist(); a.push(st.entry); saveHist(a);
     }
     mount(stage(stageTotal(), 'Examination results'), finishedCard(c, st.entry), assessCard(st.entry), extraCard(st.entry), resultsCard(c, st.entry, true),
@@ -783,6 +926,8 @@
       h('div', { class: 'row' }, btn),
       h('p', { class: 'muted thanks', text: 'Thanks to: Allah SWT, Claude AI, and every question bank that went into my chat.' }));
   }
+
+  window.OSCE_API = { h, mount, st, resultBody, scenario, lines, numOf, home };
 
   (async () => {
     const saved = sess.get();
