@@ -15,6 +15,7 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v35', d: '2026-11-22', items: ['TO NAS NOVEMBER 2026 cases: lab results that only said up/down now show example values with reference ranges (marked as AI-created example data).'] },
     { v: 'v34', d: '2026-11-21', items: ['Added 3 cases from Agha Thariq Sugijanto (Addison, EPI, Cushing; 30 cases total). Agha added to the contributors list.'] },
     { v: 'v33', d: '2026-11-21', items: ['Time reminders are now bell sounds only (no voice): 1 strike at 10 minutes left, 2 at 5, 3 at 3, 2 when reading time ends, 4 when the exam time is up. On-screen notices stay.'] },
     { v: 'v32', d: '2026-11-21', items: ['TO NAS cases corrected against the original PDFs: full original scenario wording; Ancylostomiasis scenario and CBC now follow Undana; NSHP case diagnosis follows Undikma; extra source versions noted in the prescription notes.'] },
