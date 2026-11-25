@@ -15,6 +15,10 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v43', d: '2026-11-25', items: ['The notification to a reporter now reads “Admin fixed this case’s answer”.'] },
+    { v: 'v42', d: '2026-11-25', items: ['The Admin mode switch is now at the top right, next to the 🔔, on every screen. Notifications are split in two: General (votes, comments, replies to you, and when an admin fixes a case you reported) and Admin (new report threads, admins only).'] },
+    { v: 'v41', d: '2026-11-25', items: ['Admins now have an “Admin mode” switch (under the tabs, remembered on this device) to show or hide all admin tools. Report status filter: All, Open, Closed (visible to everyone) and Deleted (admins only).'] },
+    { v: 'v40', d: '2026-11-25', items: ['Admins (set by the owner) can close, reopen and delete report threads, hide comments, and edit a case (scenario, anamnesis, test text, diagnosis, treatment, prescription…) from a thread or from All questions. Edits are saved for everyone, marked “Edited by admin” with a visible history. Admins can add other admins in the new Admin tab. Your device ID is shown on the main screen.', 'The “View the case now” button in report threads is now much easier to see.'] },
     { v: 'v39', d: '2026-11-25', items: ['Reply to a comment: tap “↩ Reply” under any comment. The person you reply to is tagged and gets a notification in the 🔔 list.', 'Fixed: the 🔔 button now shows right after you sign in, without opening Reports & Discussion first.'] },
     { v: 'v38', d: '2026-11-25', items: ['Report a case: a “Report this case” button under every case in All questions and at the end of a session (also in single-player mode). Choose what is wrong and add a comment.', 'New “Reports & Discussion” tab at the top (next to All questions): all reports in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, see the reporter, give a thumbs up or down, and comment.', 'A 🔔 button at the top right lists new thumbs up/down and comments on your own reports; tap one to open that thread.'] },
     { v: 'v35', d: '2026-11-22', items: ['TO NAS NOVEMBER 2026 cases: lab results that only said up/down now show example values with reference ranges (marked as AI-created example data).'] },
@@ -128,7 +132,7 @@
     const add = (x) => { if (x === null || x === undefined || x === false) return; if (Array.isArray(x)) x.forEach(add); else el.append(x instanceof Node ? x : document.createTextNode(String(x))); };
     kids.forEach(add); return el;
   }
-  const mount = (...n) => { app.replaceChildren(...n.flat().filter(Boolean)); window.scrollTo(0, 0); panelSet(false); if (st.user && REGISTRY_URL) { renderBell(); prefetchReports(); } };
+  const mount = (...n) => { app.replaceChildren(...n.flat().filter(Boolean)); window.scrollTo(0, 0); panelSet(false); if (st.user && REGISTRY_URL) { renderBell(); prefetchReports(); kickRemote(); } };
   /* ---- visitors (name + university, kept in a Google Sheet through an Apps Script web app; same idea as Quiz Time) ---- */
   const REGISTRY_URL = String((window.OSCE_CONFIG && window.OSCE_CONFIG.registryUrl) || '');
   const USER_KEY = 'osce.user.v1';
@@ -146,7 +150,7 @@
     async call(url, init) {
       if (!REGISTRY_URL) return null;
       const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 8000);
-      try { const res = await fetch(url, { ...init, signal: ctrl.signal, redirect: 'follow' }); const d = await res.json(); return d && d.ok ? d : null; }
+      try { const res = await fetch(url, { ...init, signal: ctrl.signal, redirect: 'follow' }); const d = await res.json(); if (d && d.conflict) return { ok: false, conflict: true }; return d && d.ok ? d : null; }
       catch (_) { return null; } finally { clearTimeout(timer); }
     },
     async sync() {
@@ -354,6 +358,7 @@
       h('section', { class: 'card' },
         h('h2', { text: 'Start an OSCE case' }),
         st.user && h('p', { class: 'muted', id: 'user-line' }, `Signed in as ${st.user.name} (${st.user.university}). `, h('button', { class: 'linkbtn', type: 'button', id: 'change-user', text: 'Change name / university', on: { click: () => userStage(home, true) } })),
+        st.user && h('p', { class: 'muted', id: 'device-line' }, 'Device ID: ', h('code', { text: st.user.id }), ' ', h('button', { class: 'linkbtn', type: 'button', id: 'copy-device', text: 'Copy', on: { click: () => { try { navigator.clipboard.writeText(st.user.id); } catch (_) { /* ignore */ } } } }), adminFlag && ` · Admin (mode ${adminOn ? 'on' : 'off'})`),
         h('p', { class: 'muted', id: 'visitors', text: visitorsText() }),
         h('p', { class: 'muted', text: `${st.cases.length} cases. Two people: the examiner operates the app, the examinee reads the case on screen first.` }),
         h('div', { class: 'sel' }, h('label', { for: 'source', text: 'Source:' }), srcSel),
@@ -844,6 +849,205 @@
     paintR();
     return wrap;
   }
+
+  /* ---- shared admin edits (stored ENCRYPTED in the sheet), admin flag and edit history ---- */
+  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '', busy: false, loaded: false };
+  let adminFlag = false; let editingOpen = false;
+  let adminOn = true;
+  try { adminOn = JSON.parse(localStorage.getItem('osce.adminmode.v1') || 'true') !== false; } catch (_) { adminOn = true; }
+  /** Admin tools show only for admins who have Admin mode switched on (the switch is remembered on this device). */
+  const adminMode = () => adminFlag && adminOn;
+  async function sealJson(obj) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, st.key, enc.encode(JSON.stringify(obj)));
+    return `e1:${b64e(iv)}.${b64e(new Uint8Array(ct))}`;
+  }
+  async function openJson(p) {
+    try {
+      const [iv, ct] = String(p).slice(3).split('.');
+      return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, st.key, b64d(ct))));
+    } catch (_) { return null; }
+  }
+  const strs = (a) => Array.isArray(a) && a.every((x) => typeof x === 'string');
+  /** The editable text of a case (what the admin editor shows and saves). */
+  function caseSnap(c) {
+    const quotes = {};
+    c.tests.forEach((t) => { if (strs(t.quote)) quotes[t.label] = t.quote.slice(); });
+    return { title: c.title || '', briefText: (c.brief && c.brief.text) || '', diagnosis: c.diagnosis || '', differential: (c.differential || []).slice(), prognosis: c.prognosis || '',
+      treatment: (c.treatment || []).slice(), prescription: (c.prescription || []).slice(), rxFooter: c.rxFooter || '', rxNote: c.rxNote || '', education: (c.education || []).slice(),
+      anamnesis: c.anamnesis.map((x) => ({ q: x.q || '', a: x.a || '' })), quotes };
+  }
+  function remoteOf(c) {
+    const e = remote.cur.get(c.id);
+    if (!e || typeof e.title !== 'string' || !e.title.trim() || typeof e.briefText !== 'string' || !e.briefText.trim() || !Array.isArray(e.anamnesis) || e.anamnesis.length !== c.anamnesis.length
+      || !['differential', 'treatment', 'prescription', 'education'].every((k) => strs(e[k])) || !['diagnosis', 'prognosis', 'rxFooter', 'rxNote'].every((k) => typeof e[k] === 'string')) return c;
+    const q = e.quotes && typeof e.quotes === 'object' ? e.quotes : {};
+    return { ...c, title: e.title, brief: { ...c.brief, text: e.briefText }, diagnosis: e.diagnosis, differential: e.differential, prognosis: e.prognosis, treatment: e.treatment,
+      prescription: e.prescription, rxFooter: e.rxFooter || undefined, rxNote: e.rxNote || undefined, education: e.education,
+      anamnesis: c.anamnesis.map((x, i) => ({ ...x, q: String(e.anamnesis[i].q), a: String(e.anamnesis[i].a) })),
+      tests: c.tests.map((t) => (strs(t.quote) && strs(q[t.label]) ? { ...t, quote: q[t.label].slice() } : t)), remoteEdit: { rev: e.rev, by: e.by, t: e.t } };
+  }
+  function rebuildCases() {
+    if (!st.baseCases || !st.cases || !st.byId) return;
+    const next = st.baseCases.map(remoteOf);
+    st.cases.length = 0; st.cases.push(...next);
+    st.byId.clear(); next.forEach((c) => st.byId.set(c.id, c));
+  }
+  async function loadRemote(quiet) {
+    if (!REGISTRY_URL || !st.user || !st.key) return false;
+    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}action=boot&app=osce&device=${encodeURIComponent(st.user.id)}`, { method: 'GET' });
+    if (!d) return false;
+    const rows = (Array.isArray(d.edits) ? d.edits : []).filter((r) => r && typeof r.item === 'string' && Number.isInteger(r.rev) && typeof r.p === 'string')
+      .sort((x, y) => (x.item < y.item ? -1 : x.item > y.item ? 1 : x.rev - y.rev));
+    const sig = `${d.admin ? 1 : 0}:${rows.length}:${rows.reduce((m, r) => Math.max(m, r.t || 0), 0)}`;
+    remote.loaded = true;
+    if (sig === remote.sig && !quiet) return true;
+    const bodies = await Promise.all(rows.map((r) => openJson(r.p)));
+    const cur = new Map(); const rev = new Map(); const hist = new Map();
+    rows.forEach((r, i) => {
+      const b = bodies[i];
+      rev.set(r.item, Math.max(rev.get(r.item) || 0, r.rev));
+      if (!hist.has(r.item)) hist.set(r.item, []);
+      hist.get(r.item).push({ rev: r.rev, by: r.by, t: r.t, kind: r.kind, note: b && b.note, before: b && b.before, set: b && b.set });
+      if (r.kind === 'revert') cur.delete(r.item); else if (b && b.set) cur.set(r.item, { ...b.set, rev: r.rev, by: r.by, t: r.t });
+    });
+    const wasAdmin = adminFlag; adminFlag = d.admin === true;
+    Object.assign(remote, { cur, rev, hist, sig });
+    if (st.baseCases) rebuildCases();
+    renderBell();
+    if (wasAdmin !== adminFlag && !editingOpen) {
+      const tab = document.querySelector('#home-tabs .tab.active');
+      if (tab && tab.id === 'tab-reports') caseReportsView(); else if (tab && tab.id === 'tab-all' && document.getElementById('source')) home();
+    }
+    return true;
+  }
+  function kickRemote() {
+    if (remote.busy || remote.loaded) return;
+    remote.busy = true; loadRemote(false).catch(() => {}).finally(() => { remote.busy = false; });
+  }
+  const adminPost = (body) => postJson({ ...body, device: st.user.id, editor: userLabel() });
+
+  const FIELD_LABEL = { title: 'Title', briefText: 'Scenario', diagnosis: 'Diagnosis', differential: 'Differential diagnosis', prognosis: 'Prognosis', treatment: 'Treatment', prescription: 'Prescription', rxFooter: 'Prescription footer', rxNote: 'Prescription note', education: 'Education' };
+  /** Edit history of one case (visible to everyone). */
+  function editInfo(c) {
+    const hs = remote.hist.get(c.id);
+    if (!hs || !hs.length) return null;
+    const clip = (t) => { t = Array.isArray(t) ? t.join(' / ') : String(t == null ? '' : t); return t.length > 300 ? `${t.slice(0, 300)}…` : t; };
+    const change = (label, a, b) => h('p', { class: 'prewrap' }, h('strong', { text: `${label}: ` }), h('s', { class: 'muted', text: clip(a) }), ' → ', clip(b));
+    const lines = (e) => {
+      const b = e.before; const n = e.set; if (!b || !n) return [];
+      const out = [];
+      Object.keys(FIELD_LABEL).forEach((k) => { if (JSON.stringify(b[k]) !== JSON.stringify(n[k])) out.push(change(FIELD_LABEL[k], b[k], n[k])); });
+      (n.anamnesis || []).forEach((x, i) => { const y = (b.anamnesis || [])[i] || {}; if (y.q !== x.q) out.push(change(`Anamnesis ${i + 1} question`, y.q, x.q)); if (y.a !== x.a) out.push(change(`Anamnesis ${i + 1} answer`, y.a, x.a)); });
+      Object.keys(n.quotes || {}).forEach((k) => { if (JSON.stringify((b.quotes || {})[k]) !== JSON.stringify(n.quotes[k])) out.push(change(k, (b.quotes || {})[k], n.quotes[k])); });
+      return out;
+    };
+    return h('details', { class: 'edit-history' }, h('summary', { text: `✎ Edited by admin · history (${hs.length})` }),
+      h('div', {}, hs.slice().sort((x, y) => y.rev - x.rev).map((e) => h('div', { class: 'qa' },
+        h('div', {}, h('strong', { text: e.kind === 'revert' ? 'Reverted to the original version' : `Edit #${e.rev}` }), h('span', { class: 'muted', text: ` · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}` })),
+        e.note && h('p', { class: 'muted', text: `Reason: ${e.note}` }), lines(e)))));
+  }
+  /** Button in Browse that opens the editor for one case. */
+  function adminCaseControl(c, repaint) {
+    const host = h('div', { class: 'noprint' });
+    const btn = h('button', { class: 'btn', type: 'button', 'data-edit': c.id, text: '✎ Edit case (admin)', on: { click: () => { btn.hidden = true; host.append(adminEditor(c, (changed) => { if (changed) repaint(); else { host.lastChild.remove(); btn.hidden = false; } })); } } });
+    host.append(btn);
+    return host;
+  }
+  /** Admin editor for one case: scenario, anamnesis, test text, diagnosis, treatment, prescription... Saved for everyone. */
+  function adminEditor(c, done) {
+    editingOpen = true;
+    const close = (changed) => { editingOpen = false; done(changed); };
+    const area = (id, v, rows) => { const t = h('textarea', { id, rows: String(rows), maxlength: '6000' }); t.value = v; return t; };
+    const before = caseSnap(c);
+    const ctl = {};
+    const spec = [['title', 'line'], ['briefText', 'text'], ['diagnosis', 'text'], ['differential', 'lines'], ['prognosis', 'text'], ['treatment', 'lines'], ['prescription', 'blocks'], ['rxFooter', 'text'], ['rxNote', 'text'], ['education', 'lines']];
+    const toStr = (k, v) => (k === 'blocks' ? v.join('\n---\n') : Array.isArray(v) ? v.join('\n') : v);
+    const fields = spec.map(([k, kind]) => {
+      let el;
+      if (kind === 'line') { el = h('input', { type: 'text', id: `ae-${k}`, maxlength: '300' }); el.value = before[k]; }
+      else el = area(`ae-${k}`, kind === 'blocks' ? before[k].join('\n---\n') : Array.isArray(before[k]) ? before[k].join('\n') : before[k], kind === 'text' ? 4 : 5);
+      ctl[k] = { el, kind };
+      const hint = kind === 'lines' ? ' (one per line)' : kind === 'blocks' ? ' (separate items with a line containing only ---)' : '';
+      return h('div', {}, h('label', { for: `ae-${k}`, text: `${FIELD_LABEL[k]}${hint}` }), el);
+    });
+    const anam = before.anamnesis.map((x, i) => { const q = area(`ae-aq${i}`, x.q, 2); const a = area(`ae-aa${i}`, x.a, 3); return { q, a, node: h('div', { class: 'qa' }, h('label', { for: `ae-aq${i}`, text: `${i + 1}. Question` }), q, h('label', { for: `ae-aa${i}`, text: 'Expected answer' }), a) }; });
+    const qkeys = Object.keys(before.quotes);
+    const quotes = qkeys.map((k, i) => { const t = area(`ae-t${i}`, before.quotes[k].join('\n'), 4); return { k, t, node: h('div', {}, h('label', { for: `ae-t${i}`, text: `${k} (one line per paragraph)` }), t) }; });
+    const note = h('input', { type: 'text', id: 'ae-note', maxlength: '200', placeholder: 'Reason (optional, shown in the edit history)' });
+    const msg = h('p', { class: 'notice', role: 'alert', hidden: true });
+    const show = (t) => { msg.hidden = false; msg.className = 'notice err'; msg.textContent = t; };
+    const lines = (v) => v.split('\n').map((x) => x.trim()).filter(Boolean);
+    const send = async (kind) => {
+      let set = null;
+      if (kind === 'edit') {
+        set = {};
+        for (const [k, kd] of spec) {
+          const v = ctl[k].el.value;
+          set[k] = kd === 'lines' ? lines(v) : kd === 'blocks' ? v.split(/\n-{3,}\n/).map((x) => x.trim()).filter(Boolean) : v.trim();
+        }
+        set.anamnesis = anam.map((x) => ({ q: x.q.value.trim(), a: x.a.value.trim() }));
+        set.quotes = {}; quotes.forEach((x) => { set.quotes[x.k] = lines(x.t.value); });
+        if (!set.title || !set.briefText) { show('The title and the scenario need text.'); return; }
+        if (JSON.stringify(set) === JSON.stringify(before)) { show('Nothing changed.'); return; }
+      }
+      saveBtn.disabled = true; if (revBtn) revBtn.disabled = true;
+      const p = await sealJson({ kind, set, before, note: note.value.trim() });
+      const res = await adminPost({ action: 'aedit', item: c.id, kind, rev: remote.rev.get(c.id) || 0, p });
+      saveBtn.disabled = false; if (revBtn) revBtn.disabled = false;
+      if (!res) { show('Could not save. Check your connection and that the sheet script is updated and redeployed.'); return; }
+      if (res.conflict) { await loadRemote(true); show('Another admin edited this case in the meantime. The latest version is loaded: close and open the editor again.'); return; }
+      await loadRemote(true);
+      close(true);
+    };
+    const mk = (id, text, cls, fn) => h('button', { class: `btn ${cls}`, type: 'button', id, text, on: { click: fn } });
+    const saveBtn = mk('ae-save', 'Save for everyone', 'primary', () => send('edit'));
+    const revBtn = remote.cur.has(c.id) ? mk('ae-revert', 'Revert to original', 'danger', () => { if (window.confirm('Revert this case to the original version for everyone?')) send('revert'); }) : null;
+    return h('div', { class: 'editor admin-editor', id: 'admin-editor' },
+      h('h3', { text: `Edit No. ${numOf(c)} (saved for everyone)` }), fields,
+      h('details', {}, h('summary', { text: `Anamnesis (${anam.length})` }), anam.map((x) => x.node)),
+      quotes.length ? h('details', {}, h('summary', { text: `Physical examination / test text (${quotes.length})` }), quotes.map((x) => x.node)) : null,
+      h('p', { class: 'muted', text: 'Images and tables are not editable here.' }),
+      h('label', { for: 'ae-note', text: 'Reason' }), note, msg,
+      h('div', { class: 'row' }, saveBtn, mk('ae-cancel', 'Cancel', '', () => close(false)), revBtn));
+  }
+  /** Admin tab: device ID, admins (add / remove) and the edit log. */
+  function adminView() {
+    stopClock();
+    const card = h('section', { class: 'card', id: 'admin-panel' });
+    let admins = null; let msg = '';
+    const load = async () => {
+      const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}action=admins&device=${encodeURIComponent(st.user.id)}`, { method: 'GET' });
+      admins = d && Array.isArray(d.admins) ? d.admins : false; paint();
+    };
+    const idIn = h('input', { id: 'ad-id', type: 'text', placeholder: 'Device ID, e.g. 21faf0a4-0960-…', autocomplete: 'off', maxlength: '64' });
+    const lbIn = h('input', { id: 'ad-label', type: 'text', placeholder: 'Name (optional)', maxlength: '60', autocomplete: 'off' });
+    const add = async () => {
+      const id = idIn.value.trim();
+      if (!/^[A-Za-z0-9-]{6,64}$/.test(id)) { msg = 'That does not look like a device ID.'; paint(); return; }
+      const res = await adminPost({ action: 'aadmin_add', target: id, label: lbIn.value.trim() });
+      msg = res ? 'Admin added.' : 'Could not add. Is the sheet script updated and redeployed?';
+      if (res) { idIn.value = ''; lbIn.value = ''; await load(); } else paint();
+    };
+    const del = async (id) => { if (!window.confirm('Remove this admin?')) return; const res = await adminPost({ action: 'aadmin_del', target: id }); msg = res ? 'Admin removed.' : 'Could not remove.'; await load(); };
+    const log = [...remote.hist.entries()].flatMap(([item, hs]) => hs.map((e) => ({ item, ...e }))).sort((x, y) => (y.t || 0) - (x.t || 0)).slice(0, 50);
+    const paint = () => card.replaceChildren(...[
+      h('h2', { text: 'Admin' }), h('p', { class: 'muted' }, 'Your device ID: ', h('code', { text: st.user.id })),
+      h('h3', { text: 'Admins' }),
+      admins === null ? h('p', { class: 'muted', role: 'status', text: 'Loading…' })
+        : admins === false ? h('p', { class: 'notice err', role: 'alert', text: 'Could not load the admin list.' })
+          : h('div', { id: 'admin-list' }, admins.map((a) => h('div', { class: 'qa' }, h('code', { text: a.id }), ` ${a.label || ''}${a.seed ? ' (owner)' : ''} `,
+            !a.seed && a.id !== st.user.id && h('button', { class: 'btn reply-btn', type: 'button', text: 'Remove', 'data-del': a.id, on: { click: () => del(a.id) } })))),
+      h('h3', { text: 'Add admin' }), h('p', { class: 'muted', text: 'Ask the person to copy their device ID from the main screen ("Device ID") and send it to you.' }),
+      h('label', { for: 'ad-id', text: 'Device ID' }), idIn, h('label', { for: 'ad-label', text: 'Name' }), lbIn,
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', id: 'ad-add', text: 'Add admin', on: { click: add } })),
+      msg && h('p', { class: 'notice', role: 'status', text: msg }),
+      h('h3', { text: 'Edit log (latest 50)' }),
+      log.length ? log.map((e) => h('div', { class: 'qa' }, h('strong', { text: e.item }), h('span', { class: 'muted', text: ` · ${e.kind === 'revert' ? 'reverted' : `edit #${e.rev}`} · ${e.by} · ${e.t ? new Date(e.t).toLocaleString() : ''}${e.note ? ` · ${e.note}` : ''}` }))) : h('p', { class: 'muted', text: 'No edits yet.' }),
+    ].filter(Boolean));
+    mount(tabBar('admin'), card);
+    paint(); load();
+  }
   let caseReports = null;
   async function loadCaseReports() {
     const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}app=osce&action=reports&device=${encodeURIComponent(st.user ? st.user.id : '')}`, { method: 'GET' });
@@ -854,7 +1058,10 @@
   const isMine = (r) => (r.dev ? r.own : r.by === userLabel());
   const seenMap = () => { const m = store.read(SEEN_KEY, {}); return m && typeof m === 'object' ? m : {}; };
   const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)), c: (r.comments || []).filter((c) => c.name !== userLabel()).length,
-    m: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).length });
+    m: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).length,
+    e: editsFor(r).length });
+  /** Admin edits of the reported case made after the report was sent (not by me). */
+  const editsFor = (r) => (remote.hist.get(r.code) || []).filter((e) => e.kind === 'edit' && (e.t || 0) > (r.t || 0) && e.by !== userLabel());
   /** A reply starts with @[Name (University)] followed by the text. */
   function replyOf(text) {
     const m = /^@\[([^\]]{2,140}(?:\([^)]*\))?)\]\s?/.exec(text || '');
@@ -871,14 +1078,15 @@
         if (m) out[r.id] = { up: 0, down: 0, c: 0, m, mine: false, title: `No. ${r.no} ${r.title}`, items: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).slice(-m) };
         continue;
       }
-      const s0 = seen[r.id] || { up: 0, down: 0, c: 0 };
-      const d = { up: Math.max(0, o.up - s0.up), down: Math.max(0, o.down - s0.down), c: Math.max(0, o.c - s0.c), m: 0, mine: true };
+      const s0 = seen[r.id] || { up: 0, down: 0, c: 0, e: 0 };
+      const d = { up: Math.max(0, o.up - s0.up), down: Math.max(0, o.down - s0.down), c: Math.max(0, o.c - s0.c), m: 0, mine: true, ed: Math.max(0, o.e - (s0.e || 0)) };
+      if (d.ed) d.edits = editsFor(r).slice(-d.ed);
       if (d.c) d.items = (r.comments || []).filter((c) => c.name !== userLabel()).slice(-d.c);
-      if (d.up || d.down || d.c) { d.title = `No. ${r.no} ${r.title}`; out[r.id] = d; }
+      if (d.up || d.down || d.c || d.ed) { d.title = `No. ${r.no} ${r.title}`; out[r.id] = d; }
     }
     return out;
   }
-  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m, 0);
+  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m + (d.ed || 0), 0);
   function markSeen(onlyId) {
     if (!caseReports || !caseReports.list) return;
     const seen = seenMap();
@@ -888,21 +1096,62 @@
   }
   let freshShown = {}; let prefetched = false;
   /* bell (top right): new thumbs up/down and comments on my reports; a click opens that thread */
+  /** Admin notifications: new report threads from other people (watermark + read list, per device). */
+  const ADMSEEN = 'osce.adminseen.v1';
+  let bellTab = 'general';
+  function adminFresh() {
+    if (!adminMode() || !caseReports || !caseReports.list) return [];
+    const list = caseReports.list.filter((r) => !r.deleted);
+    let sn = store.read(ADMSEEN, null);
+    if (!sn || typeof sn !== 'object') { sn = { base: list.reduce((m, r) => Math.max(m, r.t || 0), 0), read: [] }; store.write(ADMSEEN, sn); return []; }
+    const read = Array.isArray(sn.read) ? sn.read : [];
+    return list.filter((r) => (r.t || 0) > (sn.base || 0) && !read.includes(r.id) && !isMine(r)).sort((a, b) => b.t - a.t);
+  }
+  function adminMark(id) {
+    const sn = store.read(ADMSEEN, null) || { base: 0, read: [] };
+    if (!Array.isArray(sn.read)) sn.read = [];
+    if (id) { if (!sn.read.includes(id)) sn.read.push(id); }
+    else { sn.base = ((caseReports && caseReports.list) || []).reduce((m, r) => Math.max(m, r.t || 0), sn.base || 0); sn.read = []; }
+    store.write(ADMSEEN, sn);
+    renderBell();
+  }
   let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
   function renderBell() {
     if (!REGISTRY_URL || !st.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
     if (!bellEl) { bellEl = h('div', { class: 'bell noprint', id: 'bell' }); document.body.append(bellEl); }
     const fa = freshActivity(); const ids = Object.keys(fa);
-    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m, 0);
-    const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
-      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
+    const afr = adminFresh();
+    if (bellTab === 'admin' && !adminMode()) bellTab = 'general';
+    const nGen = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m + (fa[id].ed || 0), 0);
+    const n = nGen + afr.length;
+    const toggle = adminFlag && h('label', { class: 'admin-toggle', for: 'admin-mode' },
+      h('input', { type: 'checkbox', id: 'admin-mode', checked: adminOn, on: { change: (ev) => {
+        adminOn = ev.target.checked;
+        try { localStorage.setItem('osce.adminmode.v1', JSON.stringify(adminOn)); } catch (_) { /* ignore */ }
+        renderBell();
+        const tab = document.querySelector('#home-tabs .tab.active');
+        if (!tab) return; // a case is running: nothing admin-related is on screen
+        if (tab.id === 'tab-admin' && !adminOn) home();
+        else if (tab.id === 'tab-reports') caseReportsView();
+        else if (tab.id === 'tab-admin') adminView();
+        else if (document.getElementById('q-list')) questions();
+        else home();
+      } } }), ' 🛠 Admin mode');
+    const kids = [h('div', { class: 'bell-row' }, toggle, h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
+      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } }))];
     if (bellOpen) {
+      const tabBtn = (id, text) => h('button', { class: `bell-tab${bellTab === id ? ' active' : ''}`, type: 'button', id: `bell-tab-${id}`, text, on: { click: () => { bellTab = id; renderBell(); } } });
+      const adminItem = (r) => h('button', { class: 'bell-item', type: 'button', 'data-anotif': r.id, on: { click: () => { adminMark(r.id); goReport(r.id); } } },
+        h('strong', { text: `🆕 New thread: No. ${r.no} ${r.title}` }), h('span', { class: 'muted', text: `${r.types} · ${r.by || 'Unknown'}` }));
       kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
-        h('div', { class: 'row' }, h('strong', { text: 'Notifications' }), ids.length ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => markSeen() } }) : null),
+        h('div', { class: 'row' }, h('strong', { text: 'Notifications' }), (bellTab === 'admin' ? afr.length : ids.length) ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { if (bellTab === 'admin') adminMark(); else markSeen(); } } }) : null),
+        adminMode() ? h('div', { class: 'bell-tabs' }, tabBtn('general', `General${nGen ? ` (${nGen})` : ''}`), tabBtn('admin', `Admin${afr.length ? ` (${afr.length})` : ''}`)) : null,
+        bellTab === 'admin' ? (afr.length ? afr.map(adminItem) : h('p', { class: 'muted', text: 'No new threads.' })) :
         ids.length ? ids.map((id) => {
           const d = fa[id]; const votes = [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ');
           return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
             h('strong', { text: d.mine ? `Your report: ${d.title}` : `Reply to you: ${d.title}` }), votes ? h('span', { class: 'muted', text: votes }) : null,
+            (d.edits || []).map((e) => h('span', { class: 'muted', text: '✅ Admin fixed this case’s answer' })),
             (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === userLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
         }) : h('p', { class: 'muted', text: 'No new notifications.' })));
     }
@@ -929,13 +1178,15 @@
       const list = await loadCaseReports();
       if (list && !document.getElementById('reports-card')) { caseReports = { list }; renderBell(); }
       else if (!list) renderBell();
+      if (!editingOpen) loadRemote(false).catch(() => {});
     }, 90000);
   }
   /** Top tabs, like Quiz Time: All questions (the main menu) and Reports & Discussion. */
   function tabBar(active) {
-    return h('div', { class: 'tabs', role: 'tablist', id: 'home-tabs' }, [['all', 'All questions'], ['reports', 'Reports & Discussion']].map(([id, label]) => h('button', {
+    const tabs = h('div', { class: 'tabs', role: 'tablist', id: 'home-tabs' }, [['all', 'All questions'], ['reports', 'Reports & Discussion'], ...(adminMode() ? [['admin', 'Admin']] : [])].map(([id, label]) => h('button', {
       class: `tab${active === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`, 'aria-selected': String(active === id), text: label,
-      on: { click: () => { if (id === active) return; freshShown = {}; pinnedFresh = {}; if (id === 'all') home(); else caseReportsView(); } } })));
+      on: { click: () => { if (id === active) return; freshShown = {}; pinnedFresh = {}; if (id === 'all') home(); else if (id === 'admin') adminView(); else caseReportsView(); } } })));
+    return tabs;
   }
   const repUi = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20 };
   function caseReportsView() {
@@ -951,18 +1202,37 @@
     const reportCard = (r) => {
       const root = h('article', { class: 'card rq-item', 'data-report-id': r.id });
       const cs = { draft: '', msg: '', sending: false }; let nowOpen = false; let rendered = false;
+      const adminBar = () => {
+        if (!adminMode()) return null;
+        const closed = stOf(r) !== 'Open';
+        const noteIn = h('input', { type: 'text', maxlength: '300', id: `rq-${r.id}-note`, placeholder: 'Admin note (shown to everyone)' });
+        noteIn.value = r.note || '';
+        const act = async (body, apply) => { cs.admMsg = ''; const res = await adminPost({ id: r.id, ...body }); if (res) apply(); else cs.admMsg = 'Could not save. Is the sheet script updated and redeployed?'; paintOne(); };
+        const btn = (id, text, cls, fn) => h('button', { class: `btn ${cls || ''}`, type: 'button', id: `rq-${r.id}-${id}`, text, on: { click: fn } });
+        return h('div', { class: 'admin-bar' }, h('strong', { text: 'Admin' }),
+          h('div', { class: 'row' },
+            btn('status', closed ? 'Reopen thread' : 'Close thread', '', () => act({ action: 'astatus', status: closed ? '' : 'Closed', note: noteIn.value }, () => { r.status = closed ? '' : 'Closed'; r.note = noteIn.value.trim(); })),
+            btn('del', r.deleted ? 'Restore thread' : 'Delete thread', r.deleted ? '' : 'danger', () => { if (r.deleted || window.confirm('Delete this thread? Only admins will still see it (you can restore it).')) act({ action: 'adel', del: !r.deleted }, () => { r.deleted = !r.deleted; }); }),
+            st.byId.get(r.code) && btn('edit', '✎ Edit case', 'primary', () => { cs.edit = true; nowOpen = true; paintOne(); })),
+          h('div', { class: 'row' }, noteIn, btn('note', 'Save note', '', () => act({ action: 'astatus', note: noteIn.value }, () => { r.note = noteIn.value.trim(); }))),
+          cs.admMsg && h('p', { class: 'notice err', role: 'alert', text: cs.admMsg }));
+      };
       const paintOne = () => {
         const c = st.byId.get(r.code);
-        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: 'Case now (full case, key and explanations)' }));
+        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: '👁 View the case now (full case, key and explanations)' }));
         if (nowOpen) now.append(c ? fullCase(c) : h('p', { class: 'muted', text: 'This case is no longer in the case list.' }));
         rendered = nowOpen;
         now.addEventListener('toggle', () => { if (now.open && !rendered) paintOne(); });
         const f = freshShown[r.id];
+        root.className = `card rq-item${r.deleted ? ' deleted' : ''}`;
         root.replaceChildren(...[
+          r.deleted && h('p', { class: 'notice err', text: '🗑 Deleted: only admins can see this thread.' }),
+          adminBar(),
+          cs.edit && c && (cs.ed || (cs.ed = adminEditor(c, () => { cs.edit = false; cs.ed = null; paintOne(); }))),
           h('p', {}, h('strong', { text: `No. ${r.no} · [${r.source}] ${r.title}` }), h('span', { class: 'muted', text: ` · ${stOf(r)} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
           h('p', { class: 'muted', text: `Type: ${r.types}` }),
           h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
-          f && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[f.up && `+${f.up} 👍`, f.down && `+${f.down} 👎`, f.c && `+${f.c} comment${f.c === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}` }),
+          f && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[f.up && `+${f.up} 👍`, f.down && `+${f.down} 👎`, f.c && `+${f.c} comment${f.c === 1 ? '' : 's'}`, f.ed && '✅ fixed by admin'].filter(Boolean).join(' · ')}` }),
           r.comment && h('p', {}, h('strong', { text: 'Comment: ' }), r.comment),
           r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
           now, repVoteRow(r, paintOne, cs, `rq-${r.id}`), repCommentBox(r, paintOne, cs, `rq-${r.id}`)].filter(Boolean));
@@ -976,12 +1246,14 @@
       else if (!caseReports || caseReports.loading) kids.push(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' }));
       else if (caseReports.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }), h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { caseReports = null; load(); } } }));
       else {
-        const all = caseReports.list; const qq = repUi.query.trim().toLowerCase();
-        const shown = all.filter((r) => (repUi.status === 'all' || stOf(r) === repUi.status) && (repUi.type === 'all' || T(r).includes(repUi.type)) && (!qq || `${r.title} ${r.source} ${r.no} ${r.comment}`.toLowerCase().includes(qq))).sort(cmp[repUi.sort] || cmp.new);
+        const all = caseReports.list.filter((r) => !r.deleted || adminMode()); if (repUi.status === 'Deleted' && !adminMode()) repUi.status = 'all';
+        const statusOk = (r) => repUi.status === 'all' || (repUi.status === 'Deleted' ? !!r.deleted : !r.deleted && (repUi.status === 'Open' ? stOf(r) === 'Open' : stOf(r) !== 'Open'));
+        const qq = repUi.query.trim().toLowerCase();
+        const shown = all.filter((r) => statusOk(r) && (repUi.type === 'all' || T(r).includes(repUi.type)) && (!qq || `${r.title} ${r.source} ${r.no} ${r.comment}`.toLowerCase().includes(qq))).sort(cmp[repUi.sort] || cmp.new);
         const sel = (id, label, cur, opts, onc) => h('div', { class: 'sel' }, h('label', { for: id, text: label }),
           h('select', { id, on: { change: (ev) => { onc(ev.target.value); repUi.limit = 20; paint(); } } }, opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
         kids.push(sel('rp-sort', 'Sort by:', repUi.sort, SORTS, (v) => { repUi.sort = v; }),
-          sel('rp-status', 'Status:', repUi.status, [['all', 'All'], ...uniq(all.map(stOf)).map((x) => [x, x])], (v) => { repUi.status = v; }),
+          sel('rp-status', 'Status:', repUi.status, [['all', 'All'], ['Open', 'Open'], ['Closed', 'Closed'], ...(adminMode() ? [['Deleted', 'Deleted (admins only)']] : [])], (v) => { repUi.status = v; }),
           sel('rp-type', 'Type of error:', repUi.type, [['all', 'All'], ...uniq(all.flatMap(T)).map((x) => [x, x])], (v) => { repUi.type = v; }),
           h('label', { for: 'rp-query', text: 'Search case title / source / number / comment' }),
           h('input', { id: 'rp-query', type: 'text', value: repUi.query, autocomplete: 'off', on: { change: (ev) => { repUi.query = ev.target.value; repUi.limit = 20; paint(); } } }),
@@ -1041,9 +1313,11 @@
       (r.comments || (r.comments = [])).push({ t: Date.now(), name: userLabel(), text });
       cs.draft = ''; cs.msg = ''; cs.replyTo = ''; paint();
     };
-    return h('div', { id: `${pre}-comments` }, h('h3', { text: `Comments (${(r.comments || []).length})` }),
-      (r.comments || []).length ? r.comments.map((c) => { const rp = replyOf(c.text); return h('div', { class: 'qa' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
+    return h('div', { id: `${pre}-comments` }, h('h3', { text: `Comments (${(r.comments || []).filter((c) => !c.hidden || adminMode()).length})` }),
+      (r.comments || []).some((c) => !c.hidden || adminMode()) ? r.comments.filter((c) => !c.hidden || adminMode()).map((c) => { const rp = replyOf(c.text); return h('div', { class: 'qa' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
         h('p', { class: 'prewrap' }, rp.to && h('span', { class: `mention${rp.to === userLabel() ? ' me' : ''}`, text: `@${rp.to}` }), rp.to && ' ', rp.text),
+        c.hidden && h('p', { class: 'muted', text: '(hidden from users)' }),
+        adminMode() && c.cid && h('button', { class: 'btn reply-btn', type: 'button', text: c.hidden ? 'Unhide' : 'Hide', on: { click: async () => { const res = await adminPost({ action: 'ahide', id: r.id, cid: c.cid, hide: !c.hidden }); if (res) { c.hidden = !c.hidden; paint(); } } } }),
         c.name !== userLabel() && h('button', { class: 'btn reply-btn', type: 'button', text: '↩ Reply', on: { click: () => { cs.replyTo = c.name; paint(); const t = document.getElementById(`${pre}-ctext`); if (t) t.focus(); } } })); }) : h('p', { class: 'muted', text: 'No comments yet.' }),
       cs.replyTo && h('p', { class: 'muted reply-to' }, `Replying to ${cs.replyTo} `, h('button', { class: 'btn', type: 'button', text: '✕', 'aria-label': 'Cancel reply', on: { click: () => { cs.replyTo = ''; paint(); } } })),
       cs.msg && h('p', { class: 'notice err', role: 'alert', text: cs.msg }), ta,
@@ -1065,7 +1339,7 @@
       tests.length ? tests.map((x) => h('div', { class: 'tst' },
         h('h4', {}, x.label, aiTest(x), mark && h('span', { class: o.opened.has(x.label) ? 'badge acc' : 'badge no', text: o.opened.has(x.label) ? 'Accessed in stage 2' : 'Not accessed' })),
         resultBody(x, true))) : h('p', { class: 'muted', text: 'None.' }),
-      h('h2', { class: 'sub', text: 'Answer key' }), keyBody(c, !!(o && o.ids)));
+      h('h2', { class: 'sub', text: 'Answer key' }), keyBody(c, !!(o && o.ids)), editInfo(c));
   }
   function questions() {
     stopClock();
@@ -1078,7 +1352,7 @@
       st.source = sel.value;
       list.replaceChildren(...st.cases.filter((c) => !sel.value || c.source === sel.value).map((c) => {
         const d = h('details', { class: 'qd' }, h('summary', {}, h('span', { class: done.has(c.id) ? 'num acc' : 'num', text: `No. ${numOf(c)}` }), h('strong', { text: ` [${c.source}] ` }), c.title));
-        d.addEventListener('toggle', () => { if (d.open && !d.querySelector('.full')) d.append(fullCase(c), caseReportControl(c)); }); // built on first open: keeps the page light
+        d.addEventListener('toggle', () => { if (d.open && !d.querySelector('.full')) d.append(fullCase(c), adminMode() ? adminCaseControl(c, paint) : null, caseReportControl(c)); }); // built on first open: keeps the page light
         return d;
       }));
     };
@@ -1132,10 +1406,12 @@
     try {
       const env = await fetchEnvelope();
       const data = await decryptData(env, st.key);
-      st.cases = (data.cases || []).filter(validCase);
-      if (!st.cases.length) throw new DataError(`${DATA_URL} has no valid cases.`);
-      st.byId = new Map(st.cases.map((c) => [c.id, c]));
+      st.baseCases = (data.cases || []).filter(validCase);
+      if (!st.baseCases.length) throw new DataError(`${DATA_URL} has no valid cases.`);
       st.user = loadUser();
+      if (st.user) await Promise.race([loadRemote(true), new Promise((res) => setTimeout(res, 3500))]);
+      st.cases = st.baseCases.map(remoteOf);
+      st.byId = new Map(st.cases.map((c) => [c.id, c]));
       if (st.user) { registry.sync(); setTimeout(prefetchReports, 1500); home(); } else userStage(home, false);
     } catch (err) {
       if (err instanceof AuthError) { showLogin(); return; }

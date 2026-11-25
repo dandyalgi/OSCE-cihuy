@@ -72,3 +72,26 @@ textarea{width:100%;box-sizing:border-box;font:inherit;padding:.55rem;border-rad
 .mention.me { background: rgba(250, 204, 21, .35); border-radius: 4px; padding: 0 3px; }
 .reply-btn { font-size: .8rem; padding: 2px 8px; margin-top: 2px; }
 .reply-to { margin: 6px 0 2px; }
+.rq-item>details>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;margin:10px 0;padding:12px 14px;border:2px solid var(--pri);border-radius:10px;background:color-mix(in srgb,var(--pri) 12%,var(--card));color:var(--pri);font-weight:700;font-size:1rem}
+.rq-item>details>summary::-webkit-details-marker{display:none}
+.rq-item>details>summary::before{content:'▶';font-size:.8em;transition:transform .15s}
+.rq-item>details[open]>summary::before{transform:rotate(90deg)}
+.rq-item>details>summary::after{content:'tap to open';margin-left:auto;font-weight:400;font-size:.8rem;opacity:.85}
+.rq-item>details[open]>summary::after{content:'tap to close'}
+.admin-bar{border:2px dashed var(--pri);border-radius:10px;padding:8px 10px;margin:8px 0}
+.admin-bar input[type=text]{flex:1 1 200px;font:inherit;padding:.4rem;border:1px solid var(--bd);border-radius:8px;background:var(--card);color:var(--fg)}
+.rq-item.deleted{opacity:.6}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.admin-editor{border:2px solid var(--pri);border-radius:10px;padding:10px;margin:8px 0}
+.admin-editor textarea,.admin-editor input[type=text]{width:100%;font:inherit;padding:.4rem;border:1px solid var(--bd);border-radius:8px;background:var(--card);color:var(--fg);margin:.2rem 0 .5rem}
+.admin-editor label{display:block;font-weight:600;margin-top:.4rem}
+details.edit-history{margin:8px 0}details.edit-history>summary{cursor:pointer;font-weight:600}
+code{word-break:break-all}
+.tabbar{margin-bottom:4px}.tabbar .tabs{margin-bottom:6px}
+.admin-toggle{display:inline-flex;align-items:center;gap:6px;margin:2px 0 10px;font-weight:600;font-size:.9rem;cursor:pointer}
+
+.bell-row{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.bell-row .admin-toggle{margin:0;padding:5px 10px;border-radius:999px;border:1px solid var(--bd);background:var(--card);color:var(--fg);box-shadow:0 1px 4px rgba(0,0,0,.25);font-size:.8rem;white-space:nowrap}
+.bell-tabs{display:flex;gap:6px;margin:6px 0}
+.bell-tab{flex:1;font:inherit;font-weight:600;padding:6px 8px;border-radius:8px;border:1px solid var(--bd);background:none;color:var(--fg);cursor:pointer}
+.bell-tab.active{background:var(--pri);border-color:var(--pri);color:#fff}
