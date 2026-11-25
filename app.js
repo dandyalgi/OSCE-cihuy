@@ -15,6 +15,7 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v39', d: '2026-11-25', items: ['Reply to a comment: tap “↩ Reply” under any comment. The person you reply to is tagged and gets a notification in the 🔔 list.', 'Fixed: the 🔔 button now shows right after you sign in, without opening Reports & Discussion first.'] },
     { v: 'v38', d: '2026-11-25', items: ['Report a case: a “Report this case” button under every case in All questions and at the end of a session (also in single-player mode). Choose what is wrong and add a comment.', 'New “Reports & Discussion” tab at the top (next to All questions): all reports in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, see the reporter, give a thumbs up or down, and comment.', 'A 🔔 button at the top right lists new thumbs up/down and comments on your own reports; tap one to open that thread.'] },
     { v: 'v35', d: '2026-11-22', items: ['TO NAS NOVEMBER 2026 cases: lab results that only said up/down now show example values with reference ranges (marked as AI-created example data).'] },
     { v: 'v34', d: '2026-11-21', items: ['Added 3 cases from Agha Thariq Sugijanto (Addison, EPI, Cushing; 30 cases total). Agha added to the contributors list.'] },
@@ -127,7 +128,7 @@
     const add = (x) => { if (x === null || x === undefined || x === false) return; if (Array.isArray(x)) x.forEach(add); else el.append(x instanceof Node ? x : document.createTextNode(String(x))); };
     kids.forEach(add); return el;
   }
-  const mount = (...n) => { app.replaceChildren(...n.flat().filter(Boolean)); window.scrollTo(0, 0); panelSet(false); };
+  const mount = (...n) => { app.replaceChildren(...n.flat().filter(Boolean)); window.scrollTo(0, 0); panelSet(false); if (st.user && REGISTRY_URL) { renderBell(); prefetchReports(); } };
   /* ---- visitors (name + university, kept in a Google Sheet through an Apps Script web app; same idea as Quiz Time) ---- */
   const REGISTRY_URL = String((window.OSCE_CONFIG && window.OSCE_CONFIG.registryUrl) || '');
   const USER_KEY = 'osce.user.v1';
@@ -852,25 +853,36 @@
   const SEEN_KEY = 'osce.repseen.v1';
   const isMine = (r) => (r.dev ? r.own : r.by === userLabel());
   const seenMap = () => { const m = store.read(SEEN_KEY, {}); return m && typeof m === 'object' ? m : {}; };
-  const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)), c: (r.comments || []).filter((c) => c.name !== userLabel()).length });
+  const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)), c: (r.comments || []).filter((c) => c.name !== userLabel()).length,
+    m: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).length });
+  /** A reply starts with @[Name (University)] followed by the text. */
+  function replyOf(text) {
+    const m = /^@\[([^\]]{2,140}(?:\([^)]*\))?)\]\s?/.exec(text || '');
+    return m ? { to: m[1], text: (text || '').slice(m[0].length) } : { to: '', text: text || '' };
+  }
   function freshActivity() {
     const out = {};
     if (!caseReports || !caseReports.list || !st.user) return out;
     const seen = seenMap();
     for (const r of caseReports.list) {
-      if (!isMine(r)) continue;
-      const o = othersOf(r); const s0 = seen[r.id] || { up: 0, down: 0, c: 0 };
-      const d = { up: Math.max(0, o.up - s0.up), down: Math.max(0, o.down - s0.down), c: Math.max(0, o.c - s0.c) };
+      const o = othersOf(r);
+      if (!isMine(r)) {
+        const m = Math.max(0, o.m - ((seen[r.id] || {}).m || 0));
+        if (m) out[r.id] = { up: 0, down: 0, c: 0, m, mine: false, title: `No. ${r.no} ${r.title}`, items: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).slice(-m) };
+        continue;
+      }
+      const s0 = seen[r.id] || { up: 0, down: 0, c: 0 };
+      const d = { up: Math.max(0, o.up - s0.up), down: Math.max(0, o.down - s0.down), c: Math.max(0, o.c - s0.c), m: 0, mine: true };
       if (d.c) d.items = (r.comments || []).filter((c) => c.name !== userLabel()).slice(-d.c);
       if (d.up || d.down || d.c) { d.title = `No. ${r.no} ${r.title}`; out[r.id] = d; }
     }
     return out;
   }
-  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c, 0);
+  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m, 0);
   function markSeen(onlyId) {
     if (!caseReports || !caseReports.list) return;
     const seen = seenMap();
-    for (const r of caseReports.list) if (isMine(r) && (!onlyId || r.id === onlyId)) seen[r.id] = othersOf(r);
+    for (const r of caseReports.list) { const o = othersOf(r); if ((isMine(r) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
     store.write(SEEN_KEY, seen);
     renderBell();
   }
@@ -881,7 +893,7 @@
     if (!REGISTRY_URL || !st.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
     if (!bellEl) { bellEl = h('div', { class: 'bell noprint', id: 'bell' }); document.body.append(bellEl); }
     const fa = freshActivity(); const ids = Object.keys(fa);
-    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c, 0);
+    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m, 0);
     const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
       on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
     if (bellOpen) {
@@ -890,8 +902,8 @@
         ids.length ? ids.map((id) => {
           const d = fa[id]; const votes = [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ');
           return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
-            h('strong', { text: `Your report: ${d.title}` }), votes ? h('span', { class: 'muted', text: votes }) : null,
-            (d.items || []).map((c) => h('span', { class: 'muted', text: `💬 ${c.name}: ${c.text.length > 90 ? `${c.text.slice(0, 90)}…` : c.text}` })));
+            h('strong', { text: d.mine ? `Your report: ${d.title}` : `Reply to you: ${d.title}` }), votes ? h('span', { class: 'muted', text: votes }) : null,
+            (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === userLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
         }) : h('p', { class: 'muted', text: 'No new notifications.' })));
     }
     bellEl.replaceChildren(...kids);
@@ -909,12 +921,14 @@
   async function prefetchReports() {
     if (prefetched || !REGISTRY_URL || !st.user) return;
     prefetched = true;
+    renderBell();
     if (!caseReports) { const list = await loadCaseReports(); caseReports = list ? { list } : null; }
     renderBell();
     setInterval(async () => {
       if (document.hidden) return;
       const list = await loadCaseReports();
       if (list && !document.getElementById('reports-card')) { caseReports = { list }; renderBell(); }
+      else if (!list) renderBell();
     }, 90000);
   }
   /** Top tabs, like Quiz Time: All questions (the main menu) and Reports & Discussion. */
@@ -1014,20 +1028,24 @@
     return h('div', { class: 'row' }, btn(1, '👍', r.up, `${pre}-up`), btn(-1, '👎', r.down, `${pre}-down`));
   }
   function repCommentBox(r, paint, cs, pre) {
-    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '1000', placeholder: 'Write a comment…', on: { input: (ev) => { cs.draft = ev.target.value; } } });
+    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '800', placeholder: 'Write a comment…', on: { input: (ev) => { cs.draft = ev.target.value; } } });
     ta.value = cs.draft || '';
     const send = async () => {
-      const text = (cs.draft || '').trim();
-      if (text.length < 2 || !st.user || cs.sending) return;
+      const body = (cs.draft || '').trim();
+      if (body.length < 2 || !st.user || cs.sending) return;
+      const text = cs.replyTo ? `@[${cs.replyTo}] ${body}` : body;
       cs.sending = true;
       const res = await postJson({ action: 'rcomment', id: r.id, name: userLabel(), text });
       cs.sending = false;
       if (!res) { cs.msg = 'Could not send the comment. Try again.'; paint(); return; }
       (r.comments || (r.comments = [])).push({ t: Date.now(), name: userLabel(), text });
-      cs.draft = ''; cs.msg = ''; paint();
+      cs.draft = ''; cs.msg = ''; cs.replyTo = ''; paint();
     };
     return h('div', { id: `${pre}-comments` }, h('h3', { text: `Comments (${(r.comments || []).length})` }),
-      (r.comments || []).length ? r.comments.map((c) => h('div', { class: 'qa' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })), h('p', { class: 'prewrap', text: c.text }))) : h('p', { class: 'muted', text: 'No comments yet.' }),
+      (r.comments || []).length ? r.comments.map((c) => { const rp = replyOf(c.text); return h('div', { class: 'qa' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })),
+        h('p', { class: 'prewrap' }, rp.to && h('span', { class: `mention${rp.to === userLabel() ? ' me' : ''}`, text: `@${rp.to}` }), rp.to && ' ', rp.text),
+        c.name !== userLabel() && h('button', { class: 'btn reply-btn', type: 'button', text: '↩ Reply', on: { click: () => { cs.replyTo = c.name; paint(); const t = document.getElementById(`${pre}-ctext`); if (t) t.focus(); } } })); }) : h('p', { class: 'muted', text: 'No comments yet.' }),
+      cs.replyTo && h('p', { class: 'muted reply-to' }, `Replying to ${cs.replyTo} `, h('button', { class: 'btn', type: 'button', text: '✕', 'aria-label': 'Cancel reply', on: { click: () => { cs.replyTo = ''; paint(); } } })),
       cs.msg && h('p', { class: 'notice err', role: 'alert', text: cs.msg }), ta,
       h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', id: `${pre}-csend`, text: 'Send comment', on: { click: send } })));
   }
