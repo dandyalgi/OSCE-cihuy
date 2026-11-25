@@ -15,6 +15,7 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v38', d: '2026-11-25', items: ['Report a case: a “Report this case” button under every case in All questions and at the end of a session (also in single-player mode). Choose what is wrong and add a comment.', 'New “Reports & Discussion” tab at the top (next to All questions): all reports in one list, sort by newest, oldest, most thumbs up/down or most comments, filter by status or type of error, see the reporter, give a thumbs up or down, and comment.', 'A 🔔 button at the top right lists new thumbs up/down and comments on your own reports; tap one to open that thread.'] },
     { v: 'v35', d: '2026-11-22', items: ['TO NAS NOVEMBER 2026 cases: lab results that only said up/down now show example values with reference ranges (marked as AI-created example data).'] },
     { v: 'v34', d: '2026-11-21', items: ['Added 3 cases from Agha Thariq Sugijanto (Addison, EPI, Cushing; 30 cases total). Agha added to the contributors list.'] },
     { v: 'v33', d: '2026-11-21', items: ['Time reminders are now bell sounds only (no voice): 1 strike at 10 minutes left, 2 at 5, 3 at 3, 2 when reading time ends, 4 when the exam time is up. On-screen notices stay.'] },
@@ -348,6 +349,7 @@
     const go = (id) => { st.timerOn = tm.checked; st.assessOn = as.checked; nameStage(id); };
     const sendSug = async (body) => (REGISTRY_URL ? registry.call(REGISTRY_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, app: 'osce' }) }) : 'nourl');
     mount(bpupkhShell([
+      tabBar('all'),
       h('section', { class: 'card' },
         h('h2', { text: 'Start an OSCE case' }),
         st.user && h('p', { class: 'muted', id: 'user-line' }, `Signed in as ${st.user.name} (${st.user.university}). `, h('button', { class: 'linkbtn', type: 'button', id: 'change-user', text: 'Change name / university', on: { click: () => userStage(home, true) } })),
@@ -795,10 +797,239 @@
       const a = loadHist(); a.push(st.entry); saveHist(a);
     }
     mount(stage(stageTotal(), 'Examination results'), finishedCard(c, st.entry), assessCard(st.entry), extraCard(st.entry), resultsCard(c, st.entry, true),
+      caseReportControl(c),
       h('div', { class: 'row noprint' },
         h('button', { class: 'btn primary', id: 'again', text: 'New case', on: { click: home } }),
         h('button', { class: 'btn', id: 'pdf', text: 'Save as PDF', on: { click: doPrint } }),
         h('button', { class: 'btn', id: 'to-hist', text: 'History', on: { click: () => history() } })));
+  }
+
+  /* ---- case reports: report a case, and the public Reports page with thumbs up/down and comments (Google Sheet through the same Apps Script) ---- */
+  const CASE_TYPES = ['Incorrect scenario / physical exam', 'Incorrect anamnesis', 'Incorrect test results', 'Incorrect diagnosis', 'Incorrect treatment / prescription', 'Incorrect answer key / explanation', 'Other'];
+  const reportedCases = new Set();
+  const userLabel = () => (st.user ? `${st.user.name}${st.user.university ? ` (${st.user.university})` : ''}` : 'Unknown');
+  const postJson = (body) => (REGISTRY_URL ? registry.call(REGISTRY_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, app: 'osce' }) }) : null);
+  /** Self-contained Report button + form for one case (Browse and the end of a session). Does not re-render the page. */
+  function caseReportControl(c) {
+    const wrap = h('div', { class: 'item-report noprint' });
+    const types = new Set(); let comment = ''; let open = false; let sending = false; let msg = null;
+    const paintR = (focus) => {
+      const kids = [h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', 'data-report': c.id, 'aria-expanded': open ? 'true' : 'false', text: reportedCases.has(c.id) ? 'Reported ✓' : 'Report this case',
+        on: { click: () => { open = !open; msg = null; paintR(open ? 'input' : 'button'); } } }))];
+      if (reportedCases.has(c.id) && !open) kids.push(h('p', { class: 'muted', text: 'Thanks, your report was sent.' }));
+      if (open) kids.push(h('div', { class: 'report-box' },
+        h('h3', { text: 'Report this case' }), h('p', { class: 'muted', text: 'What looks wrong? Select everything that applies.' }),
+        CASE_TYPES.map((t) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', 'data-type': t, checked: types.has(t), on: { change: (e) => { if (e.target.checked) types.add(t); else types.delete(t); } } }), h('span', { text: ` ${t}` }))),
+        h('label', { text: 'Additional comments (optional)' }),
+        h('textarea', { maxlength: '1000', placeholder: 'For example: the diagnosis should be … because …', value: comment, on: { input: (e) => { comment = e.target.value; } } }),
+        msg && h('div', { class: `notice ${msg.type}`, role: 'alert' }, h('p', { text: msg.text })),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', type: 'button', 'data-send': c.id, text: sending ? 'Sending…' : 'Send report', disabled: sending, on: { click: async () => {
+            if (sending) return;
+            const fail = (text) => { msg = { type: 'err', text }; paintR('send'); };
+            if (!types.size) return fail('Select at least one type of error.');
+            if (types.size === 1 && types.has('Other') && !comment.trim()) return fail('Please describe the problem in the comment box.');
+            if (!REGISTRY_URL) return fail('Reporting is not available: this site is not connected to the report sheet.');
+            sending = true; msg = { type: 'ok', text: 'Sending…' }; paintR('send');
+            const res = await postJson({ action: 'report', reporter: userLabel(), code: c.id, device: st.user ? st.user.id : '', caseNo: numOf(c), source: c.source, title: c.title, types: [...types], comment: comment.trim().slice(0, 1000) });
+            sending = false;
+            if (res) { reportedCases.add(c.id); types.clear(); comment = ''; open = false; msg = null; paintR('button'); } else fail('Could not send the report. Check your connection and try again.');
+          } } }),
+          h('button', { class: 'btn', type: 'button', text: 'Cancel', on: { click: () => { open = false; msg = null; paintR('button'); } } }))));
+      wrap.replaceChildren(...kids);
+      const el = focus === 'input' ? wrap.querySelector('input') : focus === 'send' ? wrap.querySelector('[data-send]') : focus === 'button' ? wrap.querySelector('[data-report]') : null;
+      if (el) el.focus();
+    };
+    paintR();
+    return wrap;
+  }
+  let caseReports = null;
+  async function loadCaseReports() {
+    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}app=osce&action=reports&device=${encodeURIComponent(st.user ? st.user.id : '')}`, { method: 'GET' });
+    return d && Array.isArray(d.reports) ? d.reports : null;
+  }
+  /* notifications for my own reports: other people's thumbs up/down and comments since I last opened the Reports tab */
+  const SEEN_KEY = 'osce.repseen.v1';
+  const isMine = (r) => (r.dev ? r.own : r.by === userLabel());
+  const seenMap = () => { const m = store.read(SEEN_KEY, {}); return m && typeof m === 'object' ? m : {}; };
+  const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)), c: (r.comments || []).filter((c) => c.name !== userLabel()).length });
+  function freshActivity() {
+    const out = {};
+    if (!caseReports || !caseReports.list || !st.user) return out;
+    const seen = seenMap();
+    for (const r of caseReports.list) {
+      if (!isMine(r)) continue;
+      const o = othersOf(r); const s0 = seen[r.id] || { up: 0, down: 0, c: 0 };
+      const d = { up: Math.max(0, o.up - s0.up), down: Math.max(0, o.down - s0.down), c: Math.max(0, o.c - s0.c) };
+      if (d.c) d.items = (r.comments || []).filter((c) => c.name !== userLabel()).slice(-d.c);
+      if (d.up || d.down || d.c) { d.title = `No. ${r.no} ${r.title}`; out[r.id] = d; }
+    }
+    return out;
+  }
+  const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c, 0);
+  function markSeen(onlyId) {
+    if (!caseReports || !caseReports.list) return;
+    const seen = seenMap();
+    for (const r of caseReports.list) if (isMine(r) && (!onlyId || r.id === onlyId)) seen[r.id] = othersOf(r);
+    store.write(SEEN_KEY, seen);
+    renderBell();
+  }
+  let freshShown = {}; let prefetched = false;
+  /* bell (top right): new thumbs up/down and comments on my reports; a click opens that thread */
+  let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
+  function renderBell() {
+    if (!REGISTRY_URL || !st.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
+    if (!bellEl) { bellEl = h('div', { class: 'bell noprint', id: 'bell' }); document.body.append(bellEl); }
+    const fa = freshActivity(); const ids = Object.keys(fa);
+    const n = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c, 0);
+    const kids = [h('button', { class: 'bell-btn', id: 'bell-btn', type: 'button', 'aria-label': `Notifications${n ? `, ${n} new` : ''}`, 'aria-expanded': String(bellOpen), text: n ? `🔔 ${n}` : '🔔',
+      on: { click: () => { bellOpen = !bellOpen; renderBell(); } } })];
+    if (bellOpen) {
+      kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
+        h('div', { class: 'row' }, h('strong', { text: 'Notifications' }), ids.length ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => markSeen() } }) : null),
+        ids.length ? ids.map((id) => {
+          const d = fa[id]; const votes = [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ');
+          return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
+            h('strong', { text: `Your report: ${d.title}` }), votes ? h('span', { class: 'muted', text: votes }) : null,
+            (d.items || []).map((c) => h('span', { class: 'muted', text: `💬 ${c.name}: ${c.text.length > 90 ? `${c.text.slice(0, 90)}…` : c.text}` })));
+        }) : h('p', { class: 'muted', text: 'No new notifications.' })));
+    }
+    bellEl.replaceChildren(...kids);
+  }
+  function goReport(id) {
+    if (!document.getElementById('home-tabs') && !window.confirm('Leave this screen? A running case will be cancelled.')) return;
+    const d = freshActivity()[id];
+    if (d) pinnedFresh[id] = d;
+    bellOpen = false; markSeen(id);
+    Object.assign(repUi, { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000 });
+    pendingScroll = id;
+    caseReportsView(); renderBell();
+  }
+
+  async function prefetchReports() {
+    if (prefetched || !REGISTRY_URL || !st.user) return;
+    prefetched = true;
+    if (!caseReports) { const list = await loadCaseReports(); caseReports = list ? { list } : null; }
+    renderBell();
+    setInterval(async () => {
+      if (document.hidden) return;
+      const list = await loadCaseReports();
+      if (list && !document.getElementById('reports-card')) { caseReports = { list }; renderBell(); }
+    }, 90000);
+  }
+  /** Top tabs, like Quiz Time: All questions (the main menu) and Reports & Discussion. */
+  function tabBar(active) {
+    return h('div', { class: 'tabs', role: 'tablist', id: 'home-tabs' }, [['all', 'All questions'], ['reports', 'Reports & Discussion']].map(([id, label]) => h('button', {
+      class: `tab${active === id ? ' active' : ''}`, type: 'button', role: 'tab', id: `tab-${id}`, 'aria-selected': String(active === id), text: label,
+      on: { click: () => { if (id === active) return; freshShown = {}; pinnedFresh = {}; if (id === 'all') home(); else caseReportsView(); } } })));
+  }
+  const repUi = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20 };
+  function caseReportsView() {
+    stopClock();
+    const card = h('section', { class: 'card', id: 'reports-card' });
+    let marked = false;
+    const stOf = (r) => (r.status || '').trim() || 'Open';
+    const T = (r) => r.types.split(',').map((x) => x.trim()).filter(Boolean);
+    const uniq = (arr) => [...new Set(arr)].sort((x, y) => x.localeCompare(y));
+    const SORTS = [['new', 'Newest'], ['old', 'Oldest'], ['up', 'Most 👍'], ['down', 'Most 👎'], ['net', 'Best score (👍 − 👎)'], ['talk', 'Most comments']];
+    const cmp = { new: (x, y) => y.t - x.t, old: (x, y) => x.t - y.t, up: (x, y) => (y.up || 0) - (x.up || 0) || y.t - x.t, down: (x, y) => (y.down || 0) - (x.down || 0) || y.t - x.t,
+      net: (x, y) => ((y.up || 0) - (y.down || 0)) - ((x.up || 0) - (x.down || 0)) || y.t - x.t, talk: (x, y) => (y.comments || []).length - (x.comments || []).length || y.t - x.t };
+    const reportCard = (r) => {
+      const root = h('article', { class: 'card rq-item', 'data-report-id': r.id });
+      const cs = { draft: '', msg: '', sending: false }; let nowOpen = false; let rendered = false;
+      const paintOne = () => {
+        const c = st.byId.get(r.code);
+        const now = h('details', { class: 'rq-now', open: nowOpen, on: { toggle: (ev) => { nowOpen = ev.target.open; } } }, h('summary', { text: 'Case now (full case, key and explanations)' }));
+        if (nowOpen) now.append(c ? fullCase(c) : h('p', { class: 'muted', text: 'This case is no longer in the case list.' }));
+        rendered = nowOpen;
+        now.addEventListener('toggle', () => { if (now.open && !rendered) paintOne(); });
+        const f = freshShown[r.id];
+        root.replaceChildren(...[
+          h('p', {}, h('strong', { text: `No. ${r.no} · [${r.source}] ${r.title}` }), h('span', { class: 'muted', text: ` · ${stOf(r)} · ${r.t ? new Date(r.t).toLocaleString() : ''}` })),
+          h('p', { class: 'muted', text: `Type: ${r.types}` }),
+          h('p', { class: 'muted', text: `Reported by: ${r.by || 'Unknown'}` }),
+          f && h('p', { class: 'notice ok', 'data-fresh': r.id, text: `🔔 New on your report: ${[f.up && `+${f.up} 👍`, f.down && `+${f.down} 👎`, f.c && `+${f.c} comment${f.c === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}` }),
+          r.comment && h('p', {}, h('strong', { text: 'Comment: ' }), r.comment),
+          r.note && h('p', { class: 'notice ok' }, h('strong', { text: 'Admin: ' }), r.note),
+          now, repVoteRow(r, paintOne, cs, `rq-${r.id}`), repCommentBox(r, paintOne, cs, `rq-${r.id}`)].filter(Boolean));
+      };
+      paintOne();
+      return root;
+    };
+    const paint = () => {
+      const kids = [h('h2', { text: 'Reports & Discussion' }), h('p', { class: 'muted', text: 'Reports sent by everyone. Status is updated by the admin.' })];
+      if (!REGISTRY_URL) kids.push(h('p', { class: 'muted', text: 'This site is not connected to the report sheet.' }));
+      else if (!caseReports || caseReports.loading) kids.push(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' }));
+      else if (caseReports.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }), h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { caseReports = null; load(); } } }));
+      else {
+        const all = caseReports.list; const qq = repUi.query.trim().toLowerCase();
+        const shown = all.filter((r) => (repUi.status === 'all' || stOf(r) === repUi.status) && (repUi.type === 'all' || T(r).includes(repUi.type)) && (!qq || `${r.title} ${r.source} ${r.no} ${r.comment}`.toLowerCase().includes(qq))).sort(cmp[repUi.sort] || cmp.new);
+        const sel = (id, label, cur, opts, onc) => h('div', { class: 'sel' }, h('label', { for: id, text: label }),
+          h('select', { id, on: { change: (ev) => { onc(ev.target.value); repUi.limit = 20; paint(); } } }, opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
+        kids.push(sel('rp-sort', 'Sort by:', repUi.sort, SORTS, (v) => { repUi.sort = v; }),
+          sel('rp-status', 'Status:', repUi.status, [['all', 'All'], ...uniq(all.map(stOf)).map((x) => [x, x])], (v) => { repUi.status = v; }),
+          sel('rp-type', 'Type of error:', repUi.type, [['all', 'All'], ...uniq(all.flatMap(T)).map((x) => [x, x])], (v) => { repUi.type = v; }),
+          h('label', { for: 'rp-query', text: 'Search case title / source / number / comment' }),
+          h('input', { id: 'rp-query', type: 'text', value: repUi.query, autocomplete: 'off', on: { change: (ev) => { repUi.query = ev.target.value; repUi.limit = 20; paint(); } } }),
+          h('p', { class: 'muted', id: 'rp-count', role: 'status', text: `${shown.length} of ${all.length} reports.` }));
+        freshShown = { ...freshActivity(), ...pinnedFresh };
+        const nf = Object.keys(freshShown).length;
+        if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'} (marked below).` }));
+        const part = shown.slice(0, repUi.limit);
+        kids.push(h('div', { id: 'rp-list' }, part.length ? part.map(reportCard) : h('p', { class: 'muted', text: 'No reports match.' })));
+        if (shown.length > part.length) kids.push(h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', id: 'rp-more', text: `Show more (${shown.length - part.length} left)`, on: { click: () => { repUi.limit += 20; paint(); } } })));
+      }
+      card.replaceChildren(...kids.filter(Boolean));
+      if (pendingScroll && card.querySelector(`[data-report-id="${pendingScroll}"]`)) {
+        const id = pendingScroll; pendingScroll = null;
+        setTimeout(() => { const el = document.querySelector(`[data-report-id="${id}"]`); if (el) { el.scrollIntoView({ block: 'start' }); el.classList.add('flash'); } }, 50);
+      }
+    };
+    const load = async () => {
+      if (!REGISTRY_URL || (caseReports && !caseReports.error)) return;
+      caseReports = { loading: true }; paint();
+      const list = await loadCaseReports();
+      caseReports = list ? { list } : { error: true };
+      renderBell();
+      if (document.getElementById('reports-card')) paint();
+    };
+    mount(tabBar('reports'), card);
+    paint(); load();
+  }
+  function repVoteRow(r, paint, cs, pre) {
+    const cast = async (v) => {
+      if (!st.user || r.busy) return;
+      const prev = r.mine || 0; const next = prev === v ? 0 : v;
+      r.busy = true;
+      const res = await postJson({ action: 'rvote', id: r.id, device: st.user.id, vote: next });
+      r.busy = false;
+      if (!res) { cs.msg = 'Could not save your vote. Try again.'; paint(); return; }
+      if (prev > 0) r.up = Math.max(0, (r.up || 0) - 1);
+      if (prev < 0) r.down = Math.max(0, (r.down || 0) - 1);
+      if (next > 0) r.up = (r.up || 0) + 1;
+      if (next < 0) r.down = (r.down || 0) + 1;
+      r.mine = next; cs.msg = ''; paint();
+    };
+    const btn = (v, label, n, id) => h('button', { class: `btn${(r.mine || 0) === v ? ' primary' : ''}`, type: 'button', id, 'aria-pressed': String((r.mine || 0) === v), text: `${label} ${n || 0}`, on: { click: () => cast(v) } });
+    return h('div', { class: 'row' }, btn(1, '👍', r.up, `${pre}-up`), btn(-1, '👎', r.down, `${pre}-down`));
+  }
+  function repCommentBox(r, paint, cs, pre) {
+    const ta = h('textarea', { id: `${pre}-ctext`, rows: '3', maxlength: '1000', placeholder: 'Write a comment…', on: { input: (ev) => { cs.draft = ev.target.value; } } });
+    ta.value = cs.draft || '';
+    const send = async () => {
+      const text = (cs.draft || '').trim();
+      if (text.length < 2 || !st.user || cs.sending) return;
+      cs.sending = true;
+      const res = await postJson({ action: 'rcomment', id: r.id, name: userLabel(), text });
+      cs.sending = false;
+      if (!res) { cs.msg = 'Could not send the comment. Try again.'; paint(); return; }
+      (r.comments || (r.comments = [])).push({ t: Date.now(), name: userLabel(), text });
+      cs.draft = ''; cs.msg = ''; paint();
+    };
+    return h('div', { id: `${pre}-comments` }, h('h3', { text: `Comments (${(r.comments || []).length})` }),
+      (r.comments || []).length ? r.comments.map((c) => h('div', { class: 'qa' }, h('div', {}, h('strong', { text: c.name }), h('span', { class: 'muted', text: ` · ${c.t ? new Date(c.t).toLocaleString() : ''}` })), h('p', { class: 'prewrap', text: c.text }))) : h('p', { class: 'muted', text: 'No comments yet.' }),
+      cs.msg && h('p', { class: 'notice err', role: 'alert', text: cs.msg }), ta,
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', id: `${pre}-csend`, text: 'Send comment', on: { click: send } })));
   }
 
   /* ---- all questions ---- */
@@ -829,12 +1060,12 @@
       st.source = sel.value;
       list.replaceChildren(...st.cases.filter((c) => !sel.value || c.source === sel.value).map((c) => {
         const d = h('details', { class: 'qd' }, h('summary', {}, h('span', { class: done.has(c.id) ? 'num acc' : 'num', text: `No. ${numOf(c)}` }), h('strong', { text: ` [${c.source}] ` }), c.title));
-        d.addEventListener('toggle', () => { if (d.open && !d.querySelector('.full')) d.append(fullCase(c)); }); // built on first open: keeps the page light
+        d.addEventListener('toggle', () => { if (d.open && !d.querySelector('.full')) d.append(fullCase(c), caseReportControl(c)); }); // built on first open: keeps the page light
         return d;
       }));
     };
     sel.addEventListener('change', paint); paint();
-    mount(h('div', { class: 'row' }, h('button', { class: 'btn', id: 'back', text: '← Back', on: { click: home } })),
+    mount(tabBar('all'), h('div', { class: 'row' }, h('button', { class: 'btn', id: 'back', text: '← Back', on: { click: home } })),
       h('section', { class: 'card' }, h('h2', { text: 'All questions' }),
         h('p', { class: 'muted', text: 'Tap a case to see everything: scenario, physical examination, anamnesis, test results, explanations, diagnosis, prescription and more.' }),
         h('div', { class: 'sel' }, h('label', { for: 'q-source', text: 'Source:' }), sel), list));
@@ -887,7 +1118,7 @@
       if (!st.cases.length) throw new DataError(`${DATA_URL} has no valid cases.`);
       st.byId = new Map(st.cases.map((c) => [c.id, c]));
       st.user = loadUser();
-      if (st.user) { registry.sync(); home(); } else userStage(home, false);
+      if (st.user) { registry.sync(); setTimeout(prefetchReports, 1500); home(); } else userStage(home, false);
     } catch (err) {
       if (err instanceof AuthError) { showLogin(); return; }
       mount(h('section', { class: 'card' }, h('h2', { text: 'Could not load cases' }), h('p', { text: err instanceof DataError ? err.message : 'Unexpected error.' }),
@@ -928,7 +1159,7 @@
       h('p', { class: 'muted thanks', text: 'Thanks to: Allah SWT, Claude AI, and every question bank that went into my chat.' }));
   }
 
-  window.OSCE_API = { h, mount, st, resultBody, scenario, lines, numOf, home };
+  window.OSCE_API = { h, mount, st, resultBody, scenario, lines, numOf, home, caseReportControl };
 
   (async () => {
     const saved = sess.get();

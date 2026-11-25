@@ -355,7 +355,7 @@
           h('button', { class: 'btn primary', id: 'solo-again', text: 'Ulangi kasus ini', on: { click: () => start(c.id) } }),
           h('button', { class: 'btn', id: 'solo-other', text: 'Kasus lain', on: { click: () => { const { st } = API(); const pool = st.cases.filter((x) => x.id !== c.id); start(pool[Math.floor(Math.random() * pool.length)].id); } } }),
           h('button', { class: 'btn', id: 'solo-menu', text: 'Menu utama', on: { click: exit } }))),
-      anam, peSec, tests, dxSec, txSec, eduSec);
+      anam, peSec, tests, dxSec, txSec, eduSec, API().caseReportControl(c));
   }
 
   window.OSCE_SOLO = { start };
