@@ -15,6 +15,8 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v49', d: '2026-11-27', items: ['Threads are now paged: 10 per page, with ‹ › buttons and a box to type a page number.'] },
+    { v: 'v48', d: '2026-11-27', items: ['Fixed admin edits reverting to the old case text after cases.enc was re-encrypted: admin edits now use their own key that no longer depends on cases.enc, and edits made under earlier files are opened with their old keys (log in again once).'] },
     { v: 'v46', d: '2026-11-25', items: ['Saving an admin edit now waits up to 25 seconds for the server and explains why a save failed (too slow, not an admin, or script not updated).'] },
     { v: 'v45', d: '2026-11-25', items: ['Notifications are now General (new threads from other people) and My threads (activity on your reports and on threads where you commented, including replies to you). Reports & Discussion has a “My threads” filter.'] },
     { v: 'v44', d: '2026-11-25', items: ['Lighter on the server: reports and admin edits are only downloaded again when they changed, checks run every few minutes and only while the tab is open, and votes or comments that fail to send are kept on your device and retried automatically.'] },
@@ -117,10 +119,22 @@
     } finally { clearTimeout(timer); }
   }
   /** Login key lives in sessionStorage: closing the tab logs out. */
+  let oldKeys = [];
+  async function deriveOld(id, password, env) {
+    // the key for admin edits does not depend on the bank file: it is always first in the list
+    const out = [await deriveKey(id, password, { ...env, salt: b64e(enc.encode('osce-edit-key-v1')) })];
+    for (const salt of (Array.isArray(env.prev) ? env.prev : []).slice(0, 12)) {
+      if (typeof salt !== 'string' || salt === env.salt) continue;
+      try { out.push(await deriveKey(id, password, { ...env, salt })); } catch (_) { /* skip */ }
+    }
+    return out;
+  }
   const sess = {
     get() { try { return window.sessionStorage.getItem(KEY_STORE); } catch (_) { return null; } },
     set(v) { try { window.sessionStorage.setItem(KEY_STORE, v); } catch (_) { /* login just won't survive a reload */ } },
-    clear() { try { window.sessionStorage.removeItem(KEY_STORE); } catch (_) { /* ignore */ } },
+    clear() { try { window.sessionStorage.removeItem(KEY_STORE); window.sessionStorage.removeItem(KEY_STORE + '.old'); } catch (_) { /* ignore */ } },
+    getOld() { try { return JSON.parse(window.sessionStorage.getItem(KEY_STORE + '.old') || '[]'); } catch (_) { return []; } },
+    setOld(v) { try { window.sessionStorage.setItem(KEY_STORE + '.old', JSON.stringify(v)); } catch (_) { /* ignore */ } },
   };
 
   /* ---- DOM helpers ---- */
@@ -864,13 +878,16 @@
   const adminMode = () => adminFlag && adminOn;
   async function sealJson(obj) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, st.key, enc.encode(JSON.stringify(obj)));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, oldKeys[0] || st.key, enc.encode(JSON.stringify(obj)));
     return `e1:${b64e(iv)}.${b64e(new Uint8Array(ct))}`;
   }
   async function openJson(p) {
     try {
       const [iv, ct] = String(p).slice(3).split('.');
-      return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, st.key, b64d(ct))));
+      for (const k of [st.key, ...oldKeys]) {
+        try { return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, k, b64d(ct)))); } catch (_) { /* next key */ }
+      }
+      return null;
     } catch (_) { return null; }
   }
   const strs = (a) => Array.isArray(a) && a.every((x) => typeof x === 'string');
@@ -1201,7 +1218,7 @@
     const d = freshActivity()[id];
     if (d) pinnedFresh[id] = d;
     bellOpen = false; markSeen(id);
-    Object.assign(repUi, { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000, scope: 'all' });
+    Object.assign(repUi, { status: 'all', type: 'all', query: '', sort: 'new', page: 1, scope: 'all' });
     pendingScroll = id;
     caseReportsView(); renderBell();
   }
@@ -1274,7 +1291,7 @@
       on: { click: () => { if (id === active) return; freshShown = {}; pinnedFresh = {}; if (id === 'all') home(); else if (id === 'admin') adminView(); else caseReportsView(); } } })));
     return tabs;
   }
-  const repUi = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20, scope: 'all' };
+  const repUi = { status: 'all', type: 'all', query: '', sort: 'new', page: 1, scope: 'all' };
   function caseReportsView() {
     stopClock();
     const card = h('section', { class: 'card', id: 'reports-card' });
@@ -1338,20 +1355,32 @@
         const qq = repUi.query.trim().toLowerCase();
         const shown = all.filter((r) => statusOk(r) && (repUi.type === 'all' || T(r).includes(repUi.type)) && (!qq || `${r.title} ${r.source} ${r.no} ${r.comment}`.toLowerCase().includes(qq))).sort(cmp[repUi.sort] || cmp.new);
         const sel = (id, label, cur, opts, onc) => h('div', { class: 'sel' }, h('label', { for: id, text: label }),
-          h('select', { id, on: { change: (ev) => { onc(ev.target.value); repUi.limit = 20; paint(); } } }, opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
+          h('select', { id, on: { change: (ev) => { onc(ev.target.value); repUi.page = 1; paint(); } } }, opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
         kids.push(sel('rp-scope', 'Threads:', repUi.scope, [['all', 'All threads'], ['mine', `My threads (${nMine})`]], (v) => { repUi.scope = v; }),
           sel('rp-sort', 'Sort by:', repUi.sort, SORTS, (v) => { repUi.sort = v; }),
           sel('rp-status', 'Status:', repUi.status, [['all', 'All'], ['Open', 'Open'], ['Closed', 'Closed'], ...(adminMode() ? [['Deleted', 'Deleted (admins only)']] : [])], (v) => { repUi.status = v; }),
           sel('rp-type', 'Type of error:', repUi.type, [['all', 'All'], ...uniq(all.flatMap(T)).map((x) => [x, x])], (v) => { repUi.type = v; }),
           h('label', { for: 'rp-query', text: 'Search case title / source / number / comment' }),
-          h('input', { id: 'rp-query', type: 'text', value: repUi.query, autocomplete: 'off', on: { change: (ev) => { repUi.query = ev.target.value; repUi.limit = 20; paint(); } } }),
+          h('input', { id: 'rp-query', type: 'text', value: repUi.query, autocomplete: 'off', on: { change: (ev) => { repUi.query = ev.target.value; repUi.page = 1; paint(); } } }),
           h('p', { class: 'muted', id: 'rp-count', role: 'status', text: `${shown.length} of ${all.length} reports.` }));
         freshShown = { ...freshActivity(), ...pinnedFresh };
         const nf = Object.keys(freshShown).length;
         if (nf) kids.push(h('p', { class: 'notice ok', id: 'rp-fresh', role: 'status', text: `🔔 New activity on ${nf} of your report${nf === 1 ? '' : 's'} (marked below).` }));
-        const part = shown.slice(0, repUi.limit);
+        const PER = 10;
+        const pages = Math.max(1, Math.ceil(shown.length / PER));
+        if (pendingScroll) { const at = shown.findIndex((r) => r.id === pendingScroll); if (at >= 0) repUi.page = Math.floor(at / PER) + 1; }
+        repUi.page = Math.min(Math.max(1, Math.floor(Number(repUi.page)) || 1), pages);
+        const part = shown.slice((repUi.page - 1) * PER, repUi.page * PER);
+        const go = (n) => { n = Math.min(Math.max(1, Math.floor(Number(n)) || 1), pages); if (n === repUi.page) { paint(); return; } repUi.page = n; paint(); card.scrollIntoView({ block: 'start' }); };
+        const pager = (suffix) => (shown.length > PER ? h('div', { class: 'row pager', role: 'navigation', 'aria-label': 'Pages' },
+          h('button', { class: 'btn', type: 'button', id: `rp-prev${suffix}`, text: '‹', 'aria-label': 'Previous page', disabled: repUi.page <= 1, on: { click: () => go(repUi.page - 1) } }),
+          h('span', { class: 'muted', text: 'Page ' }),
+          h('input', { id: `rp-page${suffix}`, type: 'number', min: '1', max: String(pages), value: String(repUi.page), inputmode: 'numeric', 'aria-label': 'Page number', style: 'width:4.5rem', on: { change: (ev) => go(ev.target.value), keydown: (ev) => { if (ev.key === 'Enter') go(ev.target.value); } } }),
+          h('span', { class: 'muted', text: ` of ${pages}` }),
+          h('button', { class: 'btn', type: 'button', id: `rp-next${suffix}`, text: '›', 'aria-label': 'Next page', disabled: repUi.page >= pages, on: { click: () => go(repUi.page + 1) } })) : null);
+        kids.push(pager('-top'));
         kids.push(h('div', { id: 'rp-list' }, part.length ? part.map(reportCard) : h('p', { class: 'muted', text: 'No reports match.' })));
-        if (shown.length > part.length) kids.push(h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', id: 'rp-more', text: `Show more (${shown.length - part.length} left)`, on: { click: () => { repUi.limit += 20; paint(); } } })));
+        kids.push(pager(''));
       }
       card.replaceChildren(...kids.filter(Boolean));
       if (pendingScroll && card.querySelector(`[data-report-id="${pendingScroll}"]`)) {
@@ -1526,6 +1555,9 @@
             await decryptData(env, key); // throws AuthError when the ID/password is wrong
             st.key = key;
             sess.set(b64e(new Uint8Array(await crypto.subtle.exportKey('raw', key))));
+            btn.textContent = 'Loading…';
+            oldKeys = await deriveOld(id.value, pw.value, env);
+            sess.setOld(await Promise.all(oldKeys.map(async (k) => b64e(new Uint8Array(await crypto.subtle.exportKey('raw', k))))));
             load();
           } catch (ex) {
             if (ex instanceof AuthError) fail('Wrong ID or password.');
@@ -1547,7 +1579,7 @@
   (async () => {
     const saved = sess.get();
     if (saved) {
-      try { st.key = await importKey(saved); load(); return; } catch (_) { sess.clear(); }
+      try { st.key = await importKey(saved); oldKeys = await Promise.all(sess.getOld().map(importKey)); load(); return; } catch (_) { sess.clear(); }
     }
     mount(viewLogin());
   })();
