@@ -15,6 +15,9 @@
   const saveHist = (a) => store.write(HIST_KEY, a.slice(-HIST_MAX));
   const when = (t) => { try { return new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return new Date(t).toISOString(); } };
   const CHANGELOG = [
+    { v: 'v46', d: '2026-11-25', items: ['Saving an admin edit now waits up to 25 seconds for the server and explains why a save failed (too slow, not an admin, or script not updated).'] },
+    { v: 'v45', d: '2026-11-25', items: ['Notifications are now General (new threads from other people) and My threads (activity on your reports and on threads where you commented, including replies to you). Reports & Discussion has a “My threads” filter.'] },
+    { v: 'v44', d: '2026-11-25', items: ['Lighter on the server: reports and admin edits are only downloaded again when they changed, checks run every few minutes and only while the tab is open, and votes or comments that fail to send are kept on your device and retried automatically.'] },
     { v: 'v43', d: '2026-11-25', items: ['The notification to a reporter now reads “Admin fixed this case’s answer”.'] },
     { v: 'v42', d: '2026-11-25', items: ['The Admin mode switch is now at the top right, next to the 🔔, on every screen. Notifications are split in two: General (votes, comments, replies to you, and when an admin fixes a case you reported) and Admin (new report threads, admins only).'] },
     { v: 'v41', d: '2026-11-25', items: ['Admins now have an “Admin mode” switch (under the tabs, remembered on this device) to show or hide all admin tools. Report status filter: All, Open, Closed (visible to everyone) and Deleted (admins only).'] },
@@ -147,11 +150,13 @@
     return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
   }
   const registry = {
+    why: '',
     async call(url, init) {
       if (!REGISTRY_URL) return null;
-      const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 8000);
-      try { const res = await fetch(url, { ...init, signal: ctrl.signal, redirect: 'follow' }); const d = await res.json(); if (d && d.conflict) return { ok: false, conflict: true }; return d && d.ok ? d : null; }
-      catch (_) { return null; } finally { clearTimeout(timer); }
+      const { timeoutMs, ...opts } = init || {};
+      const ctrl = new AbortController(); this.why = ''; const timer = setTimeout(() => { this.why = 'timeout'; ctrl.abort(); }, timeoutMs || 8000);
+      try { const res = await fetch(url, { ...opts, signal: ctrl.signal, redirect: 'follow' }); const d = await res.json(); if (d && d.conflict) return { ok: false, conflict: true }; if (!(d && d.ok)) this.why = d && d.denied ? 'denied' : 'server'; return d && d.ok ? d : null; }
+      catch (_) { if (this.why !== 'timeout') this.why = 'network'; return null; } finally { clearTimeout(timer); }
     },
     async sync() {
       if (!st.user) return;
@@ -851,7 +856,7 @@
   }
 
   /* ---- shared admin edits (stored ENCRYPTED in the sheet), admin flag and edit history ---- */
-  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '', busy: false, loaded: false };
+  const remote = { cur: new Map(), rev: new Map(), hist: new Map(), sig: '', ev: '', busy: false, loaded: false };
   let adminFlag = false; let editingOpen = false;
   let adminOn = true;
   try { adminOn = JSON.parse(localStorage.getItem('osce.adminmode.v1') || 'true') !== false; } catch (_) { adminOn = true; }
@@ -895,8 +900,15 @@
   }
   async function loadRemote(quiet) {
     if (!REGISTRY_URL || !st.user || !st.key) return false;
-    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}action=boot&app=osce&device=${encodeURIComponent(st.user.id)}`, { method: 'GET' });
+    const since = !quiet && remote.ev && remote.sig ? `&since=${encodeURIComponent(remote.ev)}` : '';
+    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}action=boot&app=osce&device=${encodeURIComponent(st.user.id)}${since}`, { method: 'GET' });
     if (!d) return false;
+    if (d.unchanged && remote.sig) {
+      remote.loaded = true;
+      const was = adminFlag; adminFlag = d.admin === true;
+      if (was !== adminFlag) renderBell();
+      return true;
+    }
     const rows = (Array.isArray(d.edits) ? d.edits : []).filter((r) => r && typeof r.item === 'string' && Number.isInteger(r.rev) && typeof r.p === 'string')
       .sort((x, y) => (x.item < y.item ? -1 : x.item > y.item ? 1 : x.rev - y.rev));
     const sig = `${d.admin ? 1 : 0}:${rows.length}:${rows.reduce((m, r) => Math.max(m, r.t || 0), 0)}`;
@@ -912,7 +924,7 @@
       if (r.kind === 'revert') cur.delete(r.item); else if (b && b.set) cur.set(r.item, { ...b.set, rev: r.rev, by: r.by, t: r.t });
     });
     const wasAdmin = adminFlag; adminFlag = d.admin === true;
-    Object.assign(remote, { cur, rev, hist, sig });
+    Object.assign(remote, { cur, rev, hist, sig, ev: typeof d.ev === 'string' ? d.ev : '' });
     if (st.baseCases) rebuildCases();
     renderBell();
     if (wasAdmin !== adminFlag && !editingOpen) {
@@ -925,7 +937,7 @@
     if (remote.busy || remote.loaded) return;
     remote.busy = true; loadRemote(false).catch(() => {}).finally(() => { remote.busy = false; });
   }
-  const adminPost = (body) => postJson({ ...body, device: st.user.id, editor: userLabel() });
+  const adminPost = (body) => (REGISTRY_URL ? registry.call(REGISTRY_URL, { timeoutMs: 25000, method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, device: st.user.id, editor: userLabel(), app: 'osce' }) }) : null);
 
   const FIELD_LABEL = { title: 'Title', briefText: 'Scenario', diagnosis: 'Diagnosis', differential: 'Differential diagnosis', prognosis: 'Prognosis', treatment: 'Treatment', prescription: 'Prescription', rxFooter: 'Prescription footer', rxNote: 'Prescription note', education: 'Education' };
   /** Edit history of one case (visible to everyone). */
@@ -995,7 +1007,7 @@
       const p = await sealJson({ kind, set, before, note: note.value.trim() });
       const res = await adminPost({ action: 'aedit', item: c.id, kind, rev: remote.rev.get(c.id) || 0, p });
       saveBtn.disabled = false; if (revBtn) revBtn.disabled = false;
-      if (!res) { show('Could not save. Check your connection and that the sheet script is updated and redeployed.'); return; }
+      if (!res) { show('Could not save. ' + (registry.why === 'timeout' ? 'The server took too long to answer (the change may still have been saved: reload in a minute and check before trying again).' : registry.why === 'denied' ? 'The server says this device is not an admin. Check that your device ID is in the Admins list and the script is the latest deployed version.' : registry.why === 'server' ? 'The server refused the change. Make sure the sheet script is updated and redeployed as a new version.' : 'Check your connection.')); return; }
       if (res.conflict) { await loadRemote(true); show('Another admin edited this case in the meantime. The latest version is loaded: close and open the editor again.'); return; }
       await loadRemote(true);
       close(true);
@@ -1049,13 +1061,21 @@
     paint(); load();
   }
   let caseReports = null;
+  const rep = { v: '', a: '', l: null }; // token of the shared list we hold: the server answers {unchanged:true} when nothing changed
   async function loadCaseReports() {
-    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}app=osce&action=reports&device=${encodeURIComponent(st.user ? st.user.id : '')}`, { method: 'GET' });
-    return d && Array.isArray(d.reports) ? d.reports : null;
+    const since = rep.v && rep.l ? `&since=${encodeURIComponent(rep.v)}&adm=${rep.a}` : '';
+    const d = await registry.call(`${REGISTRY_URL}${REGISTRY_URL.includes('?') ? '&' : '?'}app=osce&action=reports&device=${encodeURIComponent(st.user ? st.user.id : '')}${since}`, { method: 'GET' });
+    if (!d) return null;
+    if (d.unchanged && rep.l) return rep.l;
+    if (!Array.isArray(d.reports)) return null;
+    rep.v = typeof d.v === 'string' ? d.v : ''; rep.a = d.admin ? '1' : '0'; rep.l = d.reports;
+    return d.reports;
   }
   /* notifications for my own reports: other people's thumbs up/down and comments since I last opened the Reports tab */
   const SEEN_KEY = 'osce.repseen.v1';
   const isMine = (r) => (r.dev ? r.own : r.by === userLabel());
+  /** A thread of someone else where I have written a comment. */
+  const participated = (r) => !isMine(r) && (r.comments || []).some((c) => c.name === userLabel());
   const seenMap = () => { const m = store.read(SEEN_KEY, {}); return m && typeof m === 'object' ? m : {}; };
   const othersOf = (r) => ({ up: Math.max(0, (r.up || 0) - ((r.mine || 0) > 0 ? 1 : 0)), down: Math.max(0, (r.down || 0) - ((r.mine || 0) < 0 ? 1 : 0)), c: (r.comments || []).filter((c) => c.name !== userLabel()).length,
     m: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).length,
@@ -1070,10 +1090,18 @@
   function freshActivity() {
     const out = {};
     if (!caseReports || !caseReports.list || !st.user) return out;
-    const seen = seenMap();
+    const seen = seenMap(); let init = false;
     for (const r of caseReports.list) {
       const o = othersOf(r);
       if (!isMine(r)) {
+        if (r.deleted) continue;
+        if (participated(r)) {
+          // Threads I commented on: new comments from other people. The first time we see one it only sets the starting point.
+          if (!seen[r.id]) { seen[r.id] = o; init = true; continue; }
+          const c = Math.max(0, o.c - (seen[r.id].c === undefined ? o.c : seen[r.id].c));
+          if (c) out[r.id] = { up: 0, down: 0, c, m: 0, mine: false, part: true, title: `No. ${r.no} ${r.title}`, items: (r.comments || []).filter((x) => x.name !== userLabel()).slice(-c) };
+          continue;
+        }
         const m = Math.max(0, o.m - ((seen[r.id] || {}).m || 0));
         if (m) out[r.id] = { up: 0, down: 0, c: 0, m, mine: false, title: `No. ${r.no} ${r.title}`, items: (r.comments || []).filter((c) => c.name !== userLabel() && replyOf(c.text).to === userLabel()).slice(-m) };
         continue;
@@ -1084,13 +1112,14 @@
       if (d.c) d.items = (r.comments || []).filter((c) => c.name !== userLabel()).slice(-d.c);
       if (d.up || d.down || d.c || d.ed) { d.title = `No. ${r.no} ${r.title}`; out[r.id] = d; }
     }
+    if (init) store.write(SEEN_KEY, seen);
     return out;
   }
   const freshCount = () => Object.values(freshActivity()).reduce((n, d) => n + d.up + d.down + d.c + d.m + (d.ed || 0), 0);
   function markSeen(onlyId) {
     if (!caseReports || !caseReports.list) return;
     const seen = seenMap();
-    for (const r of caseReports.list) { const o = othersOf(r); if ((isMine(r) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
+    for (const r of caseReports.list) { const o = othersOf(r); if ((isMine(r) || participated(r) || o.m) && (!onlyId || r.id === onlyId)) seen[r.id] = o; }
     store.write(SEEN_KEY, seen);
     renderBell();
   }
@@ -1099,31 +1128,37 @@
   /** Admin notifications: new report threads from other people (watermark + read list, per device). */
   const ADMSEEN = 'osce.adminseen.v1';
   let bellTab = 'general';
-  function adminFresh() {
-    if (!adminMode() || !caseReports || !caseReports.list) return [];
+  const NEWSEEN = 'osce.newseen.v1';
+  /** New threads from other people (watermark + read list, per device). Admins with Admin mode on see them in the Admin tab, everyone else in General. */
+  function freshThreads(key) {
+    if (!caseReports || !caseReports.list) return [];
     const list = caseReports.list.filter((r) => !r.deleted);
-    let sn = store.read(ADMSEEN, null);
-    if (!sn || typeof sn !== 'object') { sn = { base: list.reduce((m, r) => Math.max(m, r.t || 0), 0), read: [] }; store.write(ADMSEEN, sn); return []; }
+    let sn = store.read(key, null);
+    if (!sn || typeof sn !== 'object') { sn = { base: list.reduce((m, r) => Math.max(m, r.t || 0), 0), read: [] }; store.write(key, sn); return []; }
     const read = Array.isArray(sn.read) ? sn.read : [];
     return list.filter((r) => (r.t || 0) > (sn.base || 0) && !read.includes(r.id) && !isMine(r)).sort((a, b) => b.t - a.t);
   }
-  function adminMark(id) {
-    const sn = store.read(ADMSEEN, null) || { base: 0, read: [] };
+  function markThreads(key, id) {
+    const sn = store.read(key, null) || { base: 0, read: [] };
     if (!Array.isArray(sn.read)) sn.read = [];
     if (id) { if (!sn.read.includes(id)) sn.read.push(id); }
     else { sn.base = ((caseReports && caseReports.list) || []).reduce((m, r) => Math.max(m, r.t || 0), sn.base || 0); sn.read = []; }
-    store.write(ADMSEEN, sn);
+    store.write(key, sn);
     renderBell();
   }
+  const adminFresh = () => (adminMode() ? freshThreads(ADMSEEN) : []);
+  const adminMark = (id) => markThreads(ADMSEEN, id);
+  const newFresh = () => (adminMode() ? [] : freshThreads(NEWSEEN));
+  const newMark = (id) => markThreads(NEWSEEN, id);
   let bellEl = null; let bellOpen = false; let pendingScroll = null; let pinnedFresh = {};
   function renderBell() {
     if (!REGISTRY_URL || !st.user) { if (bellEl) { bellEl.remove(); bellEl = null; } return; }
     if (!bellEl) { bellEl = h('div', { class: 'bell noprint', id: 'bell' }); document.body.append(bellEl); }
     const fa = freshActivity(); const ids = Object.keys(fa);
-    const afr = adminFresh();
+    const afr = adminFresh(); const nfr = newFresh();
     if (bellTab === 'admin' && !adminMode()) bellTab = 'general';
     const nGen = ids.reduce((s, id) => s + fa[id].up + fa[id].down + fa[id].c + fa[id].m + (fa[id].ed || 0), 0);
-    const n = nGen + afr.length;
+    const n = nGen + afr.length + nfr.length;
     const toggle = adminFlag && h('label', { class: 'admin-toggle', for: 'admin-mode' },
       h('input', { type: 'checkbox', id: 'admin-mode', checked: adminOn, on: { change: (ev) => {
         adminOn = ev.target.checked;
@@ -1143,17 +1178,21 @@
       const tabBtn = (id, text) => h('button', { class: `bell-tab${bellTab === id ? ' active' : ''}`, type: 'button', id: `bell-tab-${id}`, text, on: { click: () => { bellTab = id; renderBell(); } } });
       const adminItem = (r) => h('button', { class: 'bell-item', type: 'button', 'data-anotif': r.id, on: { click: () => { adminMark(r.id); goReport(r.id); } } },
         h('strong', { text: `🆕 New thread: No. ${r.no} ${r.title}` }), h('span', { class: 'muted', text: `${r.types} · ${r.by || 'Unknown'}` }));
+      const newItem = (r) => h('button', { class: 'bell-item', type: 'button', 'data-nnotif': r.id, on: { click: () => { newMark(r.id); goReport(r.id); } } },
+        h('strong', { text: `🆕 New thread: No. ${r.no} ${r.title}` }), h('span', { class: 'muted', text: `${r.types} · ${r.by || 'Unknown'}` }));
+      const cnt = bellTab === 'admin' ? afr.length : bellTab === 'mine' ? ids.length : nfr.length;
       kids.push(h('div', { class: 'bell-panel card', id: 'bell-panel' },
-        h('div', { class: 'row' }, h('strong', { text: 'Notifications' }), (bellTab === 'admin' ? afr.length : ids.length) ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { if (bellTab === 'admin') adminMark(); else markSeen(); } } }) : null),
-        adminMode() ? h('div', { class: 'bell-tabs' }, tabBtn('general', `General${nGen ? ` (${nGen})` : ''}`), tabBtn('admin', `Admin${afr.length ? ` (${afr.length})` : ''}`)) : null,
+        h('div', { class: 'row' }, h('strong', { text: 'Notifications' }), cnt ? h('button', { class: 'btn', type: 'button', id: 'bell-readall', text: 'Mark all as read', on: { click: () => { if (bellTab === 'admin') adminMark(); else if (bellTab === 'mine') markSeen(); else newMark(); } } }) : null),
+        h('div', { class: 'bell-tabs' }, tabBtn('general', `General${nfr.length ? ` (${nfr.length})` : ''}`), tabBtn('mine', `My threads${nGen ? ` (${nGen})` : ''}`), adminMode() && tabBtn('admin', `Admin${afr.length ? ` (${afr.length})` : ''}`)),
         bellTab === 'admin' ? (afr.length ? afr.map(adminItem) : h('p', { class: 'muted', text: 'No new threads.' })) :
+        bellTab === 'general' ? (nfr.length ? nfr.map(newItem) : h('p', { class: 'muted', text: 'No new threads.' })) :
         ids.length ? ids.map((id) => {
           const d = fa[id]; const votes = [d.up && `+${d.up} 👍`, d.down && `+${d.down} 👎`].filter(Boolean).join(' · ');
           return h('button', { class: 'bell-item', type: 'button', 'data-notif': id, on: { click: () => goReport(id) } },
-            h('strong', { text: d.mine ? `Your report: ${d.title}` : `Reply to you: ${d.title}` }), votes ? h('span', { class: 'muted', text: votes }) : null,
+            h('strong', { text: d.mine ? `Your report: ${d.title}` : d.part ? `New comments (you commented): ${d.title}` : `Reply to you: ${d.title}` }), votes ? h('span', { class: 'muted', text: votes }) : null,
             (d.edits || []).map((e) => h('span', { class: 'muted', text: '✅ Admin fixed this case’s answer' })),
             (d.items || []).map((c) => { const t = replyOf(c.text).text; return h('span', { class: 'muted', text: `💬 ${c.name}${replyOf(c.text).to === userLabel() ? ' replied to you' : ''}: ${t.length > 90 ? `${t.slice(0, 90)}…` : t}` }); }));
-        }) : h('p', { class: 'muted', text: 'No new notifications.' })));
+        }) : h('p', { class: 'muted', text: 'No new activity on your threads.' })));
     }
     bellEl.replaceChildren(...kids);
   }
@@ -1162,7 +1201,7 @@
     const d = freshActivity()[id];
     if (d) pinnedFresh[id] = d;
     bellOpen = false; markSeen(id);
-    Object.assign(repUi, { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000 });
+    Object.assign(repUi, { status: 'all', type: 'all', query: '', sort: 'new', limit: 100000, scope: 'all' });
     pendingScroll = id;
     caseReportsView(); renderBell();
   }
@@ -1173,13 +1212,60 @@
     renderBell();
     if (!caseReports) { const list = await loadCaseReports(); caseReports = list ? { list } : null; }
     renderBell();
-    setInterval(async () => {
-      if (document.hidden) return;
-      const list = await loadCaseReports();
-      if (list && !document.getElementById('reports-card')) { caseReports = { list }; renderBell(); }
-      else if (!list) renderBell();
-      if (!editingOpen) loadRemote(false).catch(() => {});
-    }, 90000);
+    // Gentle polling: only while the tab is visible, every 3 minutes (1 minute on the Reports tab) plus a random offset,
+    // and exponentially slower after failures, so many open tabs never hit the server at the same moment.
+    let fails = 0; let last = Date.now();
+    const poll = async () => {
+      last = Date.now();
+      let ok = true;
+      try {
+        flushOutbox().catch(() => {});
+        const list = await loadCaseReports();
+        if (list && !document.getElementById('reports-card')) { caseReports = { list }; renderBell(); }
+        else if (!list) { ok = false; renderBell(); }
+        if (!editingOpen) loadRemote(false).catch(() => {});
+      } catch (_) { ok = false; }
+      fails = ok ? 0 : Math.min(fails + 1, 4);
+      schedule();
+    };
+    const schedule = () => {
+      const onReports = !!document.getElementById('reports-card');
+      const base = (onReports ? 60000 : 180000) * (2 ** fails);
+      setTimeout(() => { if (document.hidden) { schedule(); return; } poll(); }, Math.min(base, 900000) + Math.random() * 15000);
+    };
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - last > 120000) poll(); });
+    schedule();
+  }
+  /* ---- outbox: votes and comments that could not be sent are kept on this device and retried later (the server ignores a repeated comment nonce) ---- */
+  const OUTBOX = 'osce.outbox.v1';
+  let flushing = false;
+  async function postQueued(body) {
+    const res = await postJson(body);
+    if (res) return res;
+    let q = store.read(OUTBOX, []);
+    if (!Array.isArray(q)) q = [];
+    if (body.action === 'rvote') q = q.filter((x) => !(x.b && x.b.action === 'rvote' && x.b.id === body.id && x.b.device === body.device));
+    if (q.length < 50) q.push({ b: body, n: 0 });
+    store.write(OUTBOX, q);
+    return { ok: true, queued: true };
+  }
+  async function flushOutbox() {
+    if (flushing || !REGISTRY_URL) return;
+    const q = store.read(OUTBOX, []);
+    if (!Array.isArray(q) || !q.length) return;
+    flushing = true;
+    store.write(OUTBOX, []);
+    const keep = [];
+    try {
+      for (let i = 0; i < q.length; i++) {
+        const res = await postJson(q[i].b);
+        if (!res) { if ((q[i].n || 0) < 6) keep.push({ b: q[i].b, n: (q[i].n || 0) + 1 }); if (!navigator.onLine) { keep.push(...q.slice(i + 1)); break; } }
+      }
+    } finally {
+      const now = store.read(OUTBOX, []);
+      store.write(OUTBOX, keep.concat(Array.isArray(now) ? now : []).slice(0, 50));
+      flushing = false;
+    }
   }
   /** Top tabs, like Quiz Time: All questions (the main menu) and Reports & Discussion. */
   function tabBar(active) {
@@ -1188,7 +1274,7 @@
       on: { click: () => { if (id === active) return; freshShown = {}; pinnedFresh = {}; if (id === 'all') home(); else if (id === 'admin') adminView(); else caseReportsView(); } } })));
     return tabs;
   }
-  const repUi = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20 };
+  const repUi = { status: 'all', type: 'all', query: '', sort: 'new', limit: 20, scope: 'all' };
   function caseReportsView() {
     stopClock();
     const card = h('section', { class: 'card', id: 'reports-card' });
@@ -1246,13 +1332,15 @@
       else if (!caseReports || caseReports.loading) kids.push(h('p', { class: 'muted', role: 'status', text: 'Loading reports…' }));
       else if (caseReports.error) kids.push(h('p', { class: 'notice err', role: 'alert', text: 'Could not load reports. Check your connection (the sheet script must be updated and redeployed).' }), h('button', { class: 'btn', type: 'button', text: 'Retry', on: { click: () => { caseReports = null; load(); } } }));
       else {
-        const all = caseReports.list.filter((r) => !r.deleted || adminMode()); if (repUi.status === 'Deleted' && !adminMode()) repUi.status = 'all';
+        const nMine = caseReports.list.filter((r) => (!r.deleted || adminMode()) && isMine(r)).length;
+        const all = caseReports.list.filter((r) => (!r.deleted || adminMode()) && (repUi.scope !== 'mine' || isMine(r))); if (repUi.status === 'Deleted' && !adminMode()) repUi.status = 'all';
         const statusOk = (r) => repUi.status === 'all' || (repUi.status === 'Deleted' ? !!r.deleted : !r.deleted && (repUi.status === 'Open' ? stOf(r) === 'Open' : stOf(r) !== 'Open'));
         const qq = repUi.query.trim().toLowerCase();
         const shown = all.filter((r) => statusOk(r) && (repUi.type === 'all' || T(r).includes(repUi.type)) && (!qq || `${r.title} ${r.source} ${r.no} ${r.comment}`.toLowerCase().includes(qq))).sort(cmp[repUi.sort] || cmp.new);
         const sel = (id, label, cur, opts, onc) => h('div', { class: 'sel' }, h('label', { for: id, text: label }),
           h('select', { id, on: { change: (ev) => { onc(ev.target.value); repUi.limit = 20; paint(); } } }, opts.map((o) => h('option', { value: o[0], text: o[1], selected: o[0] === cur }))));
-        kids.push(sel('rp-sort', 'Sort by:', repUi.sort, SORTS, (v) => { repUi.sort = v; }),
+        kids.push(sel('rp-scope', 'Threads:', repUi.scope, [['all', 'All threads'], ['mine', `My threads (${nMine})`]], (v) => { repUi.scope = v; }),
+          sel('rp-sort', 'Sort by:', repUi.sort, SORTS, (v) => { repUi.sort = v; }),
           sel('rp-status', 'Status:', repUi.status, [['all', 'All'], ['Open', 'Open'], ['Closed', 'Closed'], ...(adminMode() ? [['Deleted', 'Deleted (admins only)']] : [])], (v) => { repUi.status = v; }),
           sel('rp-type', 'Type of error:', repUi.type, [['all', 'All'], ...uniq(all.flatMap(T)).map((x) => [x, x])], (v) => { repUi.type = v; }),
           h('label', { for: 'rp-query', text: 'Search case title / source / number / comment' }),
@@ -1287,7 +1375,7 @@
       if (!st.user || r.busy) return;
       const prev = r.mine || 0; const next = prev === v ? 0 : v;
       r.busy = true;
-      const res = await postJson({ action: 'rvote', id: r.id, device: st.user.id, vote: next });
+      const res = await postQueued({ action: 'rvote', id: r.id, device: st.user.id, vote: next });
       r.busy = false;
       if (!res) { cs.msg = 'Could not save your vote. Try again.'; paint(); return; }
       if (prev > 0) r.up = Math.max(0, (r.up || 0) - 1);
@@ -1307,10 +1395,11 @@
       if (body.length < 2 || !st.user || cs.sending) return;
       const text = cs.replyTo ? `@[${cs.replyTo}] ${body}` : body;
       cs.sending = true;
-      const res = await postJson({ action: 'rcomment', id: r.id, name: userLabel(), text });
+      const res = await postQueued({ action: 'rcomment', id: r.id, name: userLabel(), text, nonce: newDeviceId().replace(/[^A-Za-z0-9-]/g, '').slice(0, 36) });
       cs.sending = false;
       if (!res) { cs.msg = 'Could not send the comment. Try again.'; paint(); return; }
       (r.comments || (r.comments = [])).push({ t: Date.now(), name: userLabel(), text });
+      if (!isMine(r)) { const sm = seenMap(); if (!sm[r.id]) { sm[r.id] = othersOf(r); store.write(SEEN_KEY, sm); } }
       cs.draft = ''; cs.msg = ''; cs.replyTo = ''; paint();
     };
     return h('div', { id: `${pre}-comments` }, h('h3', { text: `Comments (${(r.comments || []).filter((c) => !c.hidden || adminMode()).length})` }),
@@ -1412,7 +1501,7 @@
       if (st.user) await Promise.race([loadRemote(true), new Promise((res) => setTimeout(res, 3500))]);
       st.cases = st.baseCases.map(remoteOf);
       st.byId = new Map(st.cases.map((c) => [c.id, c]));
-      if (st.user) { registry.sync(); setTimeout(prefetchReports, 1500); home(); } else userStage(home, false);
+      if (st.user) { registry.sync(); setTimeout(() => { prefetchReports(); flushOutbox().catch(() => {}); }, 1500 + Math.random() * 4000); home(); } else userStage(home, false);
     } catch (err) {
       if (err instanceof AuthError) { showLogin(); return; }
       mount(h('section', { class: 'card' }, h('h2', { text: 'Could not load cases' }), h('p', { text: err instanceof DataError ? err.message : 'Unexpected error.' }),
